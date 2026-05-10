@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback, createContext, useContext } from "react";
-import "./styles.css";
+
 const HistoryContext = createContext(null);
 const useHistory = () => useContext(HistoryContext);
 
 // ═══════════════════════════════════════════════════════════════
-//  QR GENERATOR
+//  QR GENERATOR — uses qrcode-generator for reliable output
 // ═══════════════════════════════════════════════════════════════
 function loadQRLib() {
   return new Promise((resolve) => {
-    if (window.QRCode) { resolve(); return; }
+    if (window.qrcode) { resolve(); return; }
     const s = document.createElement("script");
     s.src = "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js";
     s.onload = resolve; s.onerror = resolve;
@@ -16,53 +16,135 @@ function loadQRLib() {
   });
 }
 
-async function generateQR(text, opts = {}) {
-  await loadQRLib();
-  const { fg = "#000000", bg = "#ffffff", size = 300, shape = "square", logo = null, bgImage = null, bgOpacity = 0.35 } = opts;
+// Load qrcode-generator (a different, more reliable lib for raw matrix access)
+function loadQRGen() {
   return new Promise((resolve, reject) => {
-    try {
-      const container = document.createElement("div");
-      container.style.cssText = "position:fixed;top:-9999px;left:-9999px;width:0;height:0;overflow:hidden;";
-      document.body.appendChild(container);
-      new window.QRCode(container, { text: text || "https://qrlab.ai", width: size, height: size, colorDark: fg, colorLight: "rgba(0,0,0,0)", correctLevel: window.QRCode.CorrectLevel.H });
-      setTimeout(() => {
-        const srcEl = container.querySelector("canvas") || container.querySelector("img");
-        if (!srcEl) { document.body.removeChild(container); reject(new Error("QR gen failed")); return; }
-        const cv = document.createElement("canvas"); cv.width = size; cv.height = size;
-        const ctx = cv.getContext("2d");
-        const renderFinal = (qrImg) => {
-          ctx.fillStyle = bg; ctx.fillRect(0, 0, size, size);
-          const applyBg = (cb) => {
-            if (!bgImage) { cb(); return; }
-            const bgi = new Image();
-            bgi.onload = () => {
-              const imgAR = bgi.width / bgi.height;
-              let sx = 0, sy = 0, sw = bgi.width, sh = bgi.height;
-              if (imgAR > 1) { sw = bgi.height; sx = (bgi.width - sw) / 2; } else { sh = bgi.width; sy = (bgi.height - sh) / 2; }
-              ctx.globalAlpha = bgOpacity; ctx.drawImage(bgi, sx, sy, sw, sh, 0, 0, size, size); ctx.globalAlpha = 1; cb();
-            };
-            bgi.onerror = cb; bgi.src = bgImage;
-          };
-          applyBg(() => {
-            const tmp = document.createElement("canvas"); tmp.width = size; tmp.height = size;
-            const tctx = tmp.getContext("2d"); tctx.drawImage(qrImg, 0, 0, size, size);
-            const data = tctx.getImageData(0, 0, size, size); const px = Math.ceil(size / 37);
-            ctx.fillStyle = fg;
-            for (let row = 0; row < size; row += px) for (let col = 0; col < size; col += px) {
-              const i = (row * size + col) * 4; if (!(data.data[i] < 128 && data.data[i+3] > 64)) continue;
-              if (shape === "dots") { ctx.beginPath(); ctx.arc(col+px/2, row+px/2, px*.44, 0, Math.PI*2); ctx.fill(); }
-              else if (shape === "rounded") { const r=px*.3; ctx.beginPath(); ctx.moveTo(col+r,row); ctx.arcTo(col+px,row,col+px,row+px,r); ctx.arcTo(col+px,row+px,col,row+px,r); ctx.arcTo(col,row+px,col,row,r); ctx.arcTo(col,row,col+px,row,r); ctx.fill(); }
-              else ctx.fillRect(col, row, px, px);
-            }
-            const finish = () => { document.body.removeChild(container); resolve(cv.toDataURL("image/png")); };
-            if (logo) { const li = new Image(); li.onload = () => { const ls=size*.2,lx=(size-ls)/2,ly=(size-ls)/2; ctx.fillStyle=bg; ctx.fillRect(lx-5,ly-5,ls+10,ls+10); ctx.save(); ctx.beginPath(); ctx.roundRect(lx,ly,ls,ls,6); ctx.clip(); ctx.drawImage(li,lx,ly,ls,ls); ctx.restore(); finish(); }; li.onerror=finish; li.src=logo; } else finish();
-          });
-        };
-        if (srcEl.tagName === "CANVAS") renderFinal(srcEl);
-        else { const qi = new Image(); qi.onload = () => renderFinal(qi); qi.onerror = () => { document.body.removeChild(container); reject(new Error("img fail")); }; qi.src = srcEl.src; }
-      }, 260);
-    } catch(e) { reject(e); }
+    if (window.qrcodegen) { resolve(); return; }
+    const s = document.createElement("script");
+    // qrcode-generator lib — gives us raw boolean matrix
+    s.src = "https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js";
+    s.onload = () => {
+      // The lib exposes window.qrcode (different from QRCode class)
+      resolve();
+    };
+    s.onerror = () => reject(new Error("QR lib load failed"));
+    document.head.appendChild(s);
   });
+}
+
+async function generateQR(text, opts = {}) {
+  const {
+    fg = "#000000",
+    bg = "#ffffff",
+    size = 300,
+    shape = "square",
+    logo = null,
+    bgImage = null,
+    bgOpacity = 0.35,
+  } = opts;
+
+  // Try qrcode-generator first (gives raw matrix)
+  try {
+    await loadQRGen();
+
+    // qrcode-generator API: qrcode(typeNumber, errorCorrectionLevel)
+    const qr = window.qrcode(0, "H");
+    qr.addData(text || "https://qrlab.ai");
+    qr.make();
+
+    const moduleCount = qr.getModuleCount(); // e.g. 21, 25, 29...
+    const cv = document.createElement("canvas");
+    cv.width = size;
+    cv.height = size;
+    const ctx = cv.getContext("2d");
+
+    // Fill background
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, size, size);
+
+    // Draw background image if provided
+    if (bgImage) {
+      await new Promise((res) => {
+        const img = new Image();
+        img.onload = () => {
+          const ar = img.width / img.height;
+          let sx = 0, sy = 0, sw = img.width, sh = img.height;
+          if (ar > 1) { sw = img.height; sx = (img.width - sw) / 2; }
+          else { sh = img.width; sy = (img.height - sh) / 2; }
+          ctx.globalAlpha = bgOpacity;
+          ctx.drawImage(img, sx, sy, sw, sh, 0, 0, size, size);
+          ctx.globalAlpha = 1;
+          res();
+        };
+        img.onerror = res;
+        img.src = bgImage;
+      });
+    }
+
+    // Cell size with 1px quiet zone padding on each side
+    const padding = Math.floor(size * 0.04);
+    const drawSize = size - padding * 2;
+    const cellSize = drawSize / moduleCount;
+
+    ctx.fillStyle = fg;
+
+    for (let row = 0; row < moduleCount; row++) {
+      for (let col = 0; col < moduleCount; col++) {
+        if (!qr.isDark(row, col)) continue;
+
+        const x = padding + col * cellSize;
+        const y = padding + row * cellSize;
+        const w = cellSize;
+        const h = cellSize;
+
+        if (shape === "dots") {
+          ctx.beginPath();
+          ctx.arc(x + w / 2, y + h / 2, w * 0.45, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (shape === "rounded") {
+          const r = w * 0.28;
+          ctx.beginPath();
+          ctx.moveTo(x + r, y);
+          ctx.arcTo(x + w, y, x + w, y + h, r);
+          ctx.arcTo(x + w, y + h, x, y + h, r);
+          ctx.arcTo(x, y + h, x, y, r);
+          ctx.arcTo(x, y, x + w, y, r);
+          ctx.closePath();
+          ctx.fill();
+        } else {
+          ctx.fillRect(x, y, w, h);
+        }
+      }
+    }
+
+    // Draw logo overlay
+    if (logo) {
+      await new Promise((res) => {
+        const img = new Image();
+        img.onload = () => {
+          const ls = size * 0.2;
+          const lx = (size - ls) / 2;
+          const ly = (size - ls) / 2;
+          ctx.fillStyle = bg;
+          ctx.fillRect(lx - 4, ly - 4, ls + 8, ls + 8);
+          ctx.save();
+          ctx.beginPath();
+          ctx.roundRect(lx, ly, ls, ls, 6);
+          ctx.clip();
+          ctx.drawImage(img, lx, ly, ls, ls);
+          ctx.restore();
+          res();
+        };
+        img.onerror = res;
+        img.src = logo;
+      });
+    }
+
+    return cv.toDataURL("image/png");
+  } catch (err) {
+    console.error("QR generation error:", err);
+    throw err;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -86,14 +168,11 @@ const injectStyles = () => {
     body.lm .ghost:not(header .ghost):not(footer .ghost){border-color:rgba(0,0,0,.15)!important;color:#0d0d1c!important}
     body.lm .ghost:not(header .ghost):not(footer .ghost):hover{border-color:var(--au)!important;color:var(--au)!important}
     body.lm .step-card{background:rgba(255,255,255,.9)!important;border-color:rgba(0,0,0,.09)!important}
-
-    /* ── HEADER — always dark, fully unified ── */
     header{background:#09090e!important;border-bottom:1px solid rgba(255,255,255,.08)!important;position:fixed;top:0;left:0;right:0;z-index:1000;height:64px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px)}
     header *{color:#eeeef8!important}
     .h-logo{display:flex;align-items:center;gap:9px;cursor:pointer;flex-shrink:0}
     .h-logo-icon{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,var(--au),var(--ad));display:flex;align-items:center;justify-content:center;box-shadow:0 0 16px var(--ag);font-family:'Syne',sans-serif;font-weight:800;font-size:.9rem;color:#080808!important;flex-shrink:0}
     .h-logo-txt{font-family:'Syne',sans-serif;font-weight:800;font-size:1.2rem;background:linear-gradient(135deg,var(--au),#eeeef8 80%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-    /* Nav now sits on the RIGHT inside h-actions */
     .h-nav{display:flex;gap:2px;align-items:center}
     .h-nl{color:#7878a0!important;font-weight:600;font-size:.9rem;cursor:pointer;padding:6px 12px;border-radius:8px;transition:all .22s;white-space:nowrap;background:transparent;border:none;font-family:'Syne',sans-serif;letter-spacing:.01em}
     .h-nl:hover,.h-nl.on{color:var(--au)!important;background:rgba(245,166,35,.1)!important}
@@ -104,40 +183,23 @@ const injectStyles = () => {
     .h-btn-primary:hover{transform:translateY(-1px);box-shadow:0 0 24px var(--ag)!important;color:#080808!important}
     .h-cnt{background:linear-gradient(135deg,var(--au),var(--ad));color:#080808!important;border-radius:50%;width:16px;height:16px;font-size:.6rem;font-weight:800;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-family:'Syne',sans-serif}
     .h-divider{width:1px;height:22px;background:rgba(255,255,255,.1);margin:0 4px;flex-shrink:0}
-
-    /* ── MOBILE MENU ── */
     .mob-menu{position:fixed;top:64px;left:0;right:0;background:#09090e;border-bottom:1px solid rgba(255,255,255,.08);padding:12px 16px;z-index:999;animation:slideUp .2s ease}
     .mob-menu .h-nl{display:block;padding:11px 14px;font-size:.93rem;width:100%;text-align:left}
-
-    /* ── FOOTER always dark ── */
     footer{background:#09090e!important;border-top:1px solid rgba(255,255,255,.07)!important;position:relative;z-index:1}
     footer *{color:#eeeef8!important}
     footer .mu{color:#7878a0!important}
-    footer .lnm{font-family:'Syne',sans-serif;font-weight:800;font-size:1.2rem;background:linear-gradient(135deg,var(--au),#eeeef8 80%)!important;-webkit-background-clip:text!important;-webkit-text-fill-color:transparent!important;background-clip:text!important}
     footer .social-btn{width:34px;height:34px;border-radius:8px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .25s;font-weight:700;font-size:.8rem;flex-shrink:0}
-    footer .social-btn:hover{background:rgba(245,166,35,.14)!important;border-color:var(--au)!important;color:var(--au)!important;transform:translateY(-2px);box-shadow:0 4px 14px var(--ag)}
+    footer .social-btn:hover{background:rgba(245,166,35,.14)!important;border-color:var(--au)!important;color:var(--au)!important;transform:translateY(-2px)}
     footer .foot-link{font-size:1rem;margin-bottom:11px;cursor:pointer;transition:color .2s;display:block;color:#7878a0!important;line-height:1.5}
     footer .foot-link:hover{color:var(--au)!important}
     footer .foot-head{font-family:'Syne',sans-serif;font-weight:700;margin-bottom:18px;font-size:.85rem;text-transform:uppercase;letter-spacing:.12em;color:var(--au)!important}
-
-    /* ── STICKY FABs ── */
-    .fab-wrap{position:fixed;left:20px;bottom:24px;z-index:998;display:flex;flex-direction:column;gap:10px}
+    .fab-wrap{position:fixed;left:20px;bottom:24px;z-index:998;display:flex;flex-direction:column;gap:10px;animation:fabIn .5s ease .3s forwards;opacity:0}
     .fab{width:52px;height:52px;border-radius:50%;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .28s;box-shadow:0 4px 20px rgba(0,0,0,.4);position:relative}
     .fab:hover{transform:translateY(-3px) scale(1.08)}
     .fab-gen{background:linear-gradient(135deg,var(--au),var(--ad));box-shadow:0 4px 20px var(--ag)}
-    .fab-gen:hover{box-shadow:0 6px 28px var(--ag)}
-    .fab-scan{
-  background: linear-gradient(135deg, #f5a623, #c8821a);
-  box-shadow: 0 4px 20px rgba(245,166,35,0.40);
-}
-
-.fab-scan:hover{
-  box-shadow: 0 6px 28px rgba(200,130,26,0.5);
-}
+    .fab-scan{background:linear-gradient(135deg,#f5a623,#c8821a);box-shadow:0 4px 20px rgba(245,166,35,.4)}
     .fab-tip{position:absolute;left:58px;background:#09090e;border:1px solid rgba(255,255,255,.12);color:#eeeef8;font-size:.75rem;font-weight:600;padding:4px 10px;border-radius:7px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .2s;font-family:'DM Sans',sans-serif}
     .fab:hover .fab-tip{opacity:1}
-
-    /* ── Core ── */
     h1,h2,h3,h4{font-family:'Syne',sans-serif;color:var(--tx);line-height:1.1}
     .mu{color:var(--mu)!important}
     .gtext{background:linear-gradient(135deg,var(--au) 0%,#eeeef8 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
@@ -167,14 +229,10 @@ const injectStyles = () => {
     .range-inp{-webkit-appearance:none;appearance:none;width:100%;height:5px;border-radius:3px;background:var(--br);outline:none;padding:0;border:none!important;box-shadow:none!important}
     .range-inp::-webkit-slider-thumb{-webkit-appearance:none;width:17px;height:17px;border-radius:50%;background:linear-gradient(135deg,var(--au),var(--ad));cursor:pointer}
     .range-inp::-moz-range-thumb{width:17px;height:17px;border-radius:50%;background:linear-gradient(135deg,var(--au),var(--ad));cursor:pointer;border:none}
-
-    /* ── Step cards ── */
     .steps-row{display:grid;grid-template-columns:1fr 28px 1fr 28px 1fr 28px 1fr;align-items:stretch}
     .step-card{background:var(--sf);border:1px solid var(--br);border-radius:20px;padding:28px 18px;text-align:center;transition:border-color .3s,box-shadow .3s,transform .3s;backdrop-filter:blur(20px);display:flex;flex-direction:column;align-items:center;height:100%}
-    .step-card:hover{border-color:var(--au)!important;box-shadow:0 0 0 1px var(--au),0 0 28px var(--ag),0 0 56px var(--ag2),0 18px 40px rgba(0,0,0,.25);transform:translateY(-5px)}
+    .step-card:hover{border-color:var(--au)!important;box-shadow:0 0 0 1px var(--au),0 0 28px var(--ag),0 18px 40px rgba(0,0,0,.25);transform:translateY(-5px)}
     .step-arrow{display:flex;align-items:center;justify-content:center;color:var(--au);font-size:1.3rem;opacity:.65}
-
-    /* ── Animations ── */
     @keyframes spinning{to{transform:rotate(360deg)}}
     @keyframes flt{0%,100%{transform:translateY(0)}50%{transform:translateY(-9px)}}
     @keyframes sup{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
@@ -188,41 +246,15 @@ const injectStyles = () => {
     .pop{animation:pop .42s cubic-bezier(.34,1.56,.64,1)}
     .slide-up{animation:slideUp .32s ease forwards;opacity:0}
     .foot-col{opacity:0;animation:footReveal .55s ease forwards}
-    .fab-wrap{animation:fabIn .5s ease .3s forwards;opacity:0}
-
-    /* ── Responsive ── */
-    @media(max-width:1024px){
-      .steps-row{grid-template-columns:1fr 1fr!important;gap:12px}
-      .step-arrow{display:none!important}
-      .two-col{grid-template-columns:1fr!important}
-    }
-    @media(max-width:768px){
-      .h-nav{display:none!important}
-      .h-desk-only{display:none!important}
-      .two-col{grid-template-columns:1fr!important}
-      .steps-row{grid-template-columns:1fr!important;gap:10px}
-      .step-arrow{display:none!important}
-      .hero-grid{grid-template-columns:1fr!important}
-      .hero-qr-wrap{display:none!important}
-      .foot-grid{grid-template-columns:1fr 1fr!important;gap:24px!important}
-      .foot-brand{grid-column:1/-1!important}
-      section{padding-left:16px!important;padding-right:16px!important}
-      .page-wrap{padding-left:16px!important;padding-right:16px!important}
-      .fab-wrap{left:14px;bottom:18px}
-      .fab{width:46px;height:46px}
-      .gtop{right:14px;bottom:18px}
-    }
-    @media(max-width:480px){
-      .foot-grid{grid-template-columns:1fr!important}
-      .foot-brand{grid-column:auto!important}
-      .btn-grid{grid-template-columns:1fr 1fr!important}
-    }
+    @media(max-width:1024px){.steps-row{grid-template-columns:1fr 1fr!important;gap:12px}.step-arrow{display:none!important}.two-col{grid-template-columns:1fr!important}}
+    @media(max-width:768px){.h-nav{display:none!important}.h-desk-only{display:none!important}.two-col{grid-template-columns:1fr!important}.steps-row{grid-template-columns:1fr!important;gap:10px}.step-arrow{display:none!important}.hero-grid{grid-template-columns:1fr!important}.hero-qr-wrap{display:none!important}.foot-grid{grid-template-columns:1fr 1fr!important;gap:24px!important}.foot-brand{grid-column:1/-1!important}section{padding-left:16px!important;padding-right:16px!important}.page-wrap{padding-left:16px!important;padding-right:16px!important}.fab-wrap{left:14px;bottom:18px}.fab{width:46px;height:46px}.gtop{right:14px;bottom:18px}}
+    @media(max-width:480px){.foot-grid{grid-template-columns:1fr!important}.foot-brand{grid-column:auto!important}.btn-grid{grid-template-columns:1fr 1fr!important}}
   `;
   document.head.appendChild(s);
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  PARTICLES — rich background: dots, squares, lines, mouse glow
+//  PARTICLES
 // ═══════════════════════════════════════════════════════════════
 const Particles = () => {
   const r = useRef(null);
@@ -230,484 +262,153 @@ const Particles = () => {
     const cv = r.current; if (!cv) return;
     const ctx = cv.getContext("2d");
     const mouse = { x: -9999, y: -9999 };
-
-    const resize = () => {
-      cv.width = innerWidth;
-      cv.height = innerHeight;
-    };
+    const resize = () => { cv.width = innerWidth; cv.height = innerHeight; };
     resize();
-
-    // Create rich particle set: dots, squares, QR-style mini-squares, crosses
-    const COUNT = 110;
+    const COUNT = 90;
     const mkP = () => ({
-      x: Math.random() * innerWidth,
-      y: Math.random() * innerHeight,
-      s: Math.random() * 3 + 0.6,
-      vx: (Math.random() - 0.5) * 0.38,
-      vy: (Math.random() - 0.5) * 0.38,
-      o: Math.random() * 0.18 + 0.04,
-      type: ["dot","sq","sq","cross","sq"][Math.floor(Math.random()*5)],
-      pulse: Math.random() * Math.PI * 2, // phase offset for pulsing
+      x: Math.random() * innerWidth, y: Math.random() * innerHeight,
+      s: Math.random() * 2.5 + 0.6, vx: (Math.random() - 0.5) * 0.35, vy: (Math.random() - 0.5) * 0.35,
+      o: Math.random() * 0.16 + 0.04, type: ["dot","sq","sq","sq"][Math.floor(Math.random()*4)],
+      pulse: Math.random() * Math.PI * 2,
     });
     const P = Array.from({ length: COUNT }, mkP);
-
-    const CONNECT_DIST = 130;
-    const MOUSE_DIST   = 160;
     let id;
-
     const draw = () => {
       ctx.clearRect(0, 0, cv.width, cv.height);
-
-      // ── Draw connection lines between nearby particles ──
       for (let i = 0; i < P.length; i++) {
         for (let j = i + 1; j < P.length; j++) {
-          const dx = P[i].x - P[j].x;
-          const dy = P[i].y - P[j].y;
+          const dx = P[i].x - P[j].x, dy = P[i].y - P[j].y;
           const dist = Math.sqrt(dx*dx + dy*dy);
-          if (dist < CONNECT_DIST) {
-            const alpha = (1 - dist / CONNECT_DIST) * 0.09;
-            ctx.save();
-            ctx.globalAlpha = alpha;
-            ctx.strokeStyle = "#f5a623";
-            ctx.lineWidth = 0.7;
-            ctx.beginPath();
-            ctx.moveTo(P[i].x, P[i].y);
-            ctx.lineTo(P[j].x, P[j].y);
-            ctx.stroke();
-            ctx.restore();
-          }
+          if (dist < 120) { ctx.save(); ctx.globalAlpha = (1-dist/120)*0.08; ctx.strokeStyle="#f5a623"; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(P[i].x,P[i].y); ctx.lineTo(P[j].x,P[j].y); ctx.stroke(); ctx.restore(); }
         }
       }
-
-      // ── Mouse repulsion glow lines ──
-      for (let i = 0; i < P.length; i++) {
-        const dx = P[i].x - mouse.x;
-        const dy = P[i].y - mouse.y;
-        const dist = Math.sqrt(dx*dx + dy*dy);
-        if (dist < MOUSE_DIST) {
-          const alpha = (1 - dist / MOUSE_DIST) * 0.22;
-          ctx.save();
-          ctx.globalAlpha = alpha;
-          ctx.strokeStyle = "#f5a623";
-          ctx.lineWidth = 0.9;
-          ctx.beginPath();
-          ctx.moveTo(P[i].x, P[i].y);
-          ctx.lineTo(mouse.x, mouse.y);
-          ctx.stroke();
-          ctx.restore();
-          // Nudge particles gently away from mouse
-          P[i].vx += (dx / dist) * 0.012;
-          P[i].vy += (dy / dist) * 0.012;
-        }
-      }
-
-      // ── Draw each particle ──
       const t = Date.now() / 1000;
       P.forEach(p => {
-        // Soft pulse on opacity
-        const pulsedO = p.o * (0.7 + 0.3 * Math.sin(t * 1.4 + p.pulse));
-        ctx.save();
-        ctx.globalAlpha = pulsedO;
-        ctx.fillStyle = "#f5a623";
-
-        if (p.type === "dot") {
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, p.s, 0, Math.PI * 2);
-          ctx.fill();
-        } else if (p.type === "sq") {
-          const sz = p.s * 2.4;
-          ctx.fillRect(p.x - sz/2, p.y - sz/2, sz, sz);
-        } else if (p.type === "cross") {
-          const arm = p.s * 2.2;
-          ctx.fillRect(p.x - arm/2, p.y - 0.7, arm, 1.4);
-          ctx.fillRect(p.x - 0.7, p.y - arm/2, 1.4, arm);
-        }
-
+        const pO = p.o * (0.7 + 0.3 * Math.sin(t * 1.4 + p.pulse));
+        ctx.save(); ctx.globalAlpha = pO; ctx.fillStyle = "#f5a623";
+        if (p.type === "dot") { ctx.beginPath(); ctx.arc(p.x, p.y, p.s, 0, Math.PI*2); ctx.fill(); }
+        else { const sz = p.s * 2.2; ctx.fillRect(p.x-sz/2, p.y-sz/2, sz, sz); }
         ctx.restore();
-
-        // Speed cap to prevent runaway after mouse interaction
-        const speed = Math.sqrt(p.vx*p.vx + p.vy*p.vy);
-        if (speed > 1.2) { p.vx *= 0.96; p.vy *= 0.96; }
-
-        p.x += p.vx;
-        p.y += p.vy;
-
-        // Wrap around edges
-        if (p.x < -20) p.x = cv.width + 20;
-        if (p.x > cv.width + 20) p.x = -20;
-        if (p.y < -20) p.y = cv.height + 20;
-        if (p.y > cv.height + 20) p.y = -20;
+        const dx = p.x - mouse.x, dy = p.y - mouse.y, d = Math.sqrt(dx*dx+dy*dy);
+        if (d < 140) { p.vx += (dx/d)*0.01; p.vy += (dy/d)*0.01; }
+        const spd = Math.sqrt(p.vx*p.vx+p.vy*p.vy);
+        if (spd > 1.1) { p.vx *= 0.96; p.vy *= 0.96; }
+        p.x += p.vx; p.y += p.vy;
+        if (p.x < -10) p.x = cv.width+10; if (p.x > cv.width+10) p.x = -10;
+        if (p.y < -10) p.y = cv.height+10; if (p.y > cv.height+10) p.y = -10;
       });
-
       id = requestAnimationFrame(draw);
     };
-
     const onMove = e => { mouse.x = e.clientX; mouse.y = e.clientY + scrollY; };
     const onLeave = () => { mouse.x = -9999; mouse.y = -9999; };
-
     draw();
-    addEventListener("resize", resize);
-    addEventListener("mousemove", onMove);
-    addEventListener("mouseleave", onLeave);
-
-    return () => {
-      cancelAnimationFrame(id);
-      removeEventListener("resize", resize);
-      removeEventListener("mousemove", onMove);
-      removeEventListener("mouseleave", onLeave);
-    };
+    addEventListener("resize", resize); addEventListener("mousemove", onMove); addEventListener("mouseleave", onLeave);
+    return () => { cancelAnimationFrame(id); removeEventListener("resize",resize); removeEventListener("mousemove",onMove); removeEventListener("mouseleave",onLeave); };
   }, []);
-
-  return (
-    <canvas
-      ref={r}
-      style={{
-        position: "fixed",
-        top: 0, left: 0,
-        width: "100%", height: "100%",
-        pointerEvents: "none",
-        zIndex: 0,
-      }}
-    />
-  );
+  return <canvas ref={r} style={{position:"fixed",top:0,left:0,width:"100%",height:"100%",pointerEvents:"none",zIndex:0}}/>;
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  HERO QR — cell-by-cell build animation with real QR pattern
+//  HERO QR animation
 // ═══════════════════════════════════════════════════════════════
-
-// 21×21 QR matrix for https://qrlab.ai (pre-computed, guaranteed to render)
 const QR_MATRIX = [
-  [1,1,1,1,1,1,1,0,1,1,0,0,1,0,1,1,1,1,1,1,1],
-  [1,0,0,0,0,0,1,0,0,1,1,0,0,0,1,0,0,0,0,0,1],
-  [1,0,1,1,1,0,1,0,1,0,1,1,1,0,1,0,1,1,1,0,1],
-  [1,0,1,1,1,0,1,0,0,1,0,1,0,0,1,0,1,1,1,0,1],
-  [1,0,1,1,1,0,1,0,1,1,1,0,1,0,1,0,1,1,1,0,1],
-  [1,0,0,0,0,0,1,0,0,0,1,1,0,0,1,0,0,0,0,0,1],
-  [1,1,1,1,1,1,1,0,1,0,1,0,1,0,1,1,1,1,1,1,1],
-  [0,0,0,0,0,0,0,0,1,1,0,1,1,0,0,0,0,0,0,0,0],
-  [1,1,0,1,1,0,1,1,0,1,1,0,1,1,0,1,1,0,1,1,0],
-  [0,1,1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,1],
-  [1,0,1,1,0,1,1,1,0,1,0,0,1,1,0,1,1,0,1,0,1],
-  [1,1,0,0,1,0,0,0,1,1,1,0,0,1,1,0,0,1,1,0,0],
-  [0,1,1,1,0,1,1,0,0,0,1,0,1,0,0,1,0,1,1,1,0],
-  [0,0,0,0,0,0,0,0,1,1,0,1,0,1,1,0,0,0,1,1,1],
-  [1,1,1,1,1,1,1,0,0,0,1,0,1,0,1,0,1,0,0,0,1],
-  [1,0,0,0,0,0,1,0,1,1,0,1,0,1,1,0,1,1,0,1,0],
-  [1,0,1,1,1,0,1,0,0,0,1,0,1,0,1,1,0,0,1,0,1],
-  [1,0,1,1,1,0,1,0,1,0,0,1,0,1,0,0,1,0,0,1,1],
-  [1,0,1,1,1,0,1,0,0,1,1,0,1,0,1,0,0,1,1,0,0],
-  [1,0,0,0,0,0,1,0,1,0,0,1,0,1,0,1,1,0,0,1,0],
+  [1,1,1,1,1,1,1,0,1,1,0,0,1,0,1,1,1,1,1,1,1],[1,0,0,0,0,0,1,0,0,1,1,0,0,0,1,0,0,0,0,0,1],
+  [1,0,1,1,1,0,1,0,1,0,1,1,1,0,1,0,1,1,1,0,1],[1,0,1,1,1,0,1,0,0,1,0,1,0,0,1,0,1,1,1,0,1],
+  [1,0,1,1,1,0,1,0,1,1,1,0,1,0,1,0,1,1,1,0,1],[1,0,0,0,0,0,1,0,0,0,1,1,0,0,1,0,0,0,0,0,1],
+  [1,1,1,1,1,1,1,0,1,0,1,0,1,0,1,1,1,1,1,1,1],[0,0,0,0,0,0,0,0,1,1,0,1,1,0,0,0,0,0,0,0,0],
+  [1,1,0,1,1,0,1,1,0,1,1,0,1,1,0,1,1,0,1,1,0],[0,1,1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,1],
+  [1,0,1,1,0,1,1,1,0,1,0,0,1,1,0,1,1,0,1,0,1],[1,1,0,0,1,0,0,0,1,1,1,0,0,1,1,0,0,1,1,0,0],
+  [0,1,1,1,0,1,1,0,0,0,1,0,1,0,0,1,0,1,1,1,0],[0,0,0,0,0,0,0,0,1,1,0,1,0,1,1,0,0,0,1,1,1],
+  [1,1,1,1,1,1,1,0,0,0,1,0,1,0,1,0,1,0,0,0,1],[1,0,0,0,0,0,1,0,1,1,0,1,0,1,1,0,1,1,0,1,0],
+  [1,0,1,1,1,0,1,0,0,0,1,0,1,0,1,1,0,0,1,0,1],[1,0,1,1,1,0,1,0,1,0,0,1,0,1,0,0,1,0,0,1,1],
+  [1,0,1,1,1,0,1,0,0,1,1,0,1,0,1,0,0,1,1,0,0],[1,0,0,0,0,0,1,0,1,0,0,1,0,1,0,1,1,0,0,1,0],
   [1,1,1,1,1,1,1,0,0,1,1,0,1,0,1,0,0,1,0,1,1],
 ];
 
 const HeroQR = () => {
-  const GRID = 21;
-  const CELL = 11;
-  const GAP = 1;
-  const TOTAL_SIZE = GRID * (CELL + GAP);
-  const TOTAL_CELLS = GRID * GRID;
-
-  // Flatten matrix into cells immediately — no async, no loading state
-  const allCells = QR_MATRIX.flatMap((row, r) =>
-    row.map((dark, c) => ({
-      id: r * GRID + c,
-      dark: dark === 1,
-      isCorner: (r < 7 && c < 7) || (r < 7 && c >= GRID - 7) || (r >= GRID - 7 && c < 7),
-      r, c,
-    }))
-  );
-
-  // Row-by-row order (top → bottom, left → right)
-  const revealOrder = allCells
-    .slice()
-    .sort((a, b) => a.r !== b.r ? a.r - b.r : a.c - b.c)
-    .map(cell => cell.id);
-
-  const [visibleCount, setVisibleCount] = useState(0);
-  const [phase, setPhase] = useState("building"); // "building" | "complete" | "resetting"
-  const animRef = useRef(null);
-  const countRef = useRef(0); // use ref so closure always reads latest value
-
-  useEffect(() => {
-    const SPEED = 12;
-    const HOLD  = 3000;
-    const BLANK = 400;
-
-    // Clear any leftover timers from previous cycle
+  const GRID=21, CELL=11, GAP=1, TOTAL_SIZE=GRID*(CELL+GAP), TOTAL_CELLS=GRID*GRID;
+  const allCells = QR_MATRIX.flatMap((row,r)=>row.map((dark,c)=>({id:r*GRID+c,dark:dark===1,isCorner:(r<7&&c<7)||(r<7&&c>=GRID-7)||(r>=GRID-7&&c<7),r,c})));
+  const revealOrder = allCells.slice().sort((a,b)=>a.r!==b.r?a.r-b.r:a.c-b.c).map(cell=>cell.id);
+  const [visibleCount,setVisibleCount]=useState(0);
+  const [phase,setPhase]=useState("building");
+  const animRef=useRef(null); const countRef=useRef(0);
+  useEffect(()=>{
     clearTimeout(animRef.current);
-
-    if (phase === "building") {
-      countRef.current = 0;
-      setVisibleCount(0);
-
-      const step = () => {
-        countRef.current += 1;
-        setVisibleCount(countRef.current);
-
-        if (countRef.current >= TOTAL_CELLS) {
-          setPhase("complete");
-          return;
-        }
-        animRef.current = setTimeout(step, SPEED);
-      };
-
-      animRef.current = setTimeout(step, SPEED);
-
-    } else if (phase === "complete") {
-      // Hold the complete QR, then reset
-      animRef.current = setTimeout(() => {
-        setPhase("resetting");
-      }, HOLD);
-
-    } else if (phase === "resetting") {
-      setVisibleCount(0);
-      countRef.current = 0;
-      // Brief blank pause then rebuild
-      animRef.current = setTimeout(() => {
-        setPhase("building");
-      }, BLANK);
-    }
-
-    return () => clearTimeout(animRef.current);
-  }, [phase]);
-
-  const visibleSet = new Set(revealOrder.slice(0, visibleCount));
-  const scanRow = phase === "building" && visibleCount < TOTAL_CELLS
-    ? Math.floor(visibleCount / GRID)
-    : -1;
-
-  return (
+    if(phase==="building"){countRef.current=0;setVisibleCount(0);const step=()=>{countRef.current+=1;setVisibleCount(countRef.current);if(countRef.current>=TOTAL_CELLS){setPhase("complete");return;}animRef.current=setTimeout(step,12);};animRef.current=setTimeout(step,12);}
+    else if(phase==="complete"){animRef.current=setTimeout(()=>setPhase("resetting"),3000);}
+    else if(phase==="resetting"){setVisibleCount(0);countRef.current=0;animRef.current=setTimeout(()=>setPhase("building"),400);}
+    return()=>clearTimeout(animRef.current);
+  },[phase]);
+  const visibleSet=new Set(revealOrder.slice(0,visibleCount));
+  const scanRow=phase==="building"&&visibleCount<TOTAL_CELLS?Math.floor(visibleCount/GRID):-1;
+  return(
     <div className="flt" style={{display:"inline-block"}}>
-      <div style={{
-        borderRadius: 22,
-        padding: 20,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        background: "rgba(255,255,255,.04)",
-        border: "1px solid rgba(245,166,35,.22)",
-        boxShadow: "0 0 55px rgba(245,166,35,.18), 0 20px 55px rgba(0,0,0,.42)",
-        position: "relative",
-        overflow: "hidden",
-        backdropFilter: "blur(20px)",
-      }}>
-
-        {/* Status badge — centered above grid */}
-        <div style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 6,
-          marginBottom: 10,
-          fontSize: ".72rem",
-          fontWeight: 800,
-          letterSpacing: ".12em",
-          fontFamily: "Syne, sans-serif",
-          color: phase === "complete" ? "#22c55e" : "#f5a623",
-          transition: "color 0.4s",
-          width: "100%",
-          textAlign: "center",
-        }}>
-          <span style={{
-            width: 7, height: 7,
-            borderRadius: "50%",
-            background: phase === "complete" ? "#22c55e" : "#f5a623",
-            display: "inline-block",
-            flexShrink: 0,
-            boxShadow: phase === "complete" ? "0 0 8px #22c55e" : "0 0 8px #f5a623",
-            animation: phase === "building" ? "spinning 1s linear infinite" : "none",
-          }}/>
-          {phase === "complete" ? "READY" : phase === "resetting" ? "···" : "GENERATING…"}
+      <div style={{borderRadius:22,padding:20,display:"flex",flexDirection:"column",alignItems:"center",background:"rgba(255,255,255,.04)",border:"1px solid rgba(245,166,35,.22)",boxShadow:"0 0 55px rgba(245,166,35,.18),0 20px 55px rgba(0,0,0,.42)",position:"relative",overflow:"hidden",backdropFilter:"blur(20px)"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,marginBottom:10,fontSize:".72rem",fontWeight:800,letterSpacing:".12em",fontFamily:"Syne,sans-serif",color:phase==="complete"?"#22c55e":"#f5a623",transition:"color 0.4s",width:"100%",textAlign:"center"}}>
+          <span style={{width:7,height:7,borderRadius:"50%",background:phase==="complete"?"#22c55e":"#f5a623",display:"inline-block",flexShrink:0,boxShadow:phase==="complete"?"0 0 8px #22c55e":"0 0 8px #f5a623"}}/>
+          {phase==="complete"?"READY":phase==="resetting"?"···":"GENERATING…"}
         </div>
-
-        {/* QR Grid with scan line */}
-        <div style={{position:"relative", display:"inline-block"}}>
-          {/* Scan line sweeping down */}
-          {scanRow >= 0 && (
-            <div style={{
-              position: "absolute",
-              left: 0, right: 0,
-              top: scanRow * (CELL + GAP) + CELL / 2 - 1,
-              height: 3,
-              background: "linear-gradient(90deg, transparent, #f5a623cc, #fff, #f5a623cc, transparent)",
-              boxShadow: "0 0 14px #f5a623, 0 0 30px rgba(245,166,35,.55)",
-              borderRadius: 2,
-              zIndex: 10,
-              pointerEvents: "none",
-              transition: `top ${12}ms linear`,
-            }}/>
-          )}
-
-          <div style={{
-            display: "grid",
-            gridTemplateColumns: `repeat(${GRID}, ${CELL}px)`,
-            gap: `${GAP}px`,
-            width: TOTAL_SIZE,
-            height: TOTAL_SIZE,
-          }}>
-            {allCells.map(cell => {
-              const on = cell.dark && visibleSet.has(cell.id);
-              return (
-                <div key={cell.id} style={{
-                  width: CELL,
-                  height: CELL,
-                  borderRadius: cell.isCorner ? 2 : 1,
-                  background: on
-                    ? cell.isCorner
-                      ? "linear-gradient(135deg,#f5a623,#c8821a)"
-                      : "#f5a623"
-                    : "transparent",
-                  opacity: on ? 1 : 0,
-                  transform: on ? "scale(1)" : "scale(0.05)",
-                  transition: on
-                    ? "opacity 0.1s ease, transform 0.13s cubic-bezier(.34,1.56,.64,1)"
-                    : "opacity 0.05s, transform 0.05s",
-                  boxShadow: on && cell.isCorner ? "0 0 4px rgba(245,166,35,.6)" : "none",
-                }}/>
-              );
-            })}
+        <div style={{position:"relative",display:"inline-block"}}>
+          {scanRow>=0&&<div style={{position:"absolute",left:0,right:0,top:scanRow*(CELL+GAP)+CELL/2-1,height:3,background:"linear-gradient(90deg,transparent,#f5a623cc,#fff,#f5a623cc,transparent)",boxShadow:"0 0 14px #f5a623",borderRadius:2,zIndex:10,pointerEvents:"none",transition:`top 12ms linear`}}/>}
+          <div style={{display:"grid",gridTemplateColumns:`repeat(${GRID},${CELL}px)`,gap:`${GAP}px`,width:TOTAL_SIZE,height:TOTAL_SIZE}}>
+            {allCells.map(cell=>{const on=cell.dark&&visibleSet.has(cell.id);return(<div key={cell.id} style={{width:CELL,height:CELL,borderRadius:cell.isCorner?2:1,background:on?(cell.isCorner?"linear-gradient(135deg,#f5a623,#c8821a)":"#f5a623"):"transparent",opacity:on?1:0,transform:on?"scale(1)":"scale(0.05)",transition:on?"opacity 0.1s ease,transform 0.13s cubic-bezier(.34,1.56,.64,1)":"opacity 0.05s,transform 0.05s"}}/>);})}
           </div>
         </div>
-
-        {/* SCAN ME label — centered below grid */}
-        <div style={{
-          textAlign: "center",
-          marginTop: 10,
-          color: phase === "complete" ? "#22c55e" : "#f5a623",
-          fontSize: ".7rem",
-          fontWeight: 700,
-          letterSpacing: ".14em",
-          fontFamily: "Syne, sans-serif",
-          transition: "color 0.4s",
-          width: "100%",
-        }}>
-          {phase === "complete" ? "✓ SCAN ME" : "▲ SCAN ME ▲"}
-        </div>
+        <div style={{textAlign:"center",marginTop:10,color:phase==="complete"?"#22c55e":"#f5a623",fontSize:".7rem",fontWeight:700,letterSpacing:".14em",fontFamily:"Syne,sans-serif",transition:"color 0.4s",width:"100%"}}>{phase==="complete"?"✓ SCAN ME":"▲ SCAN ME ▲"}</div>
       </div>
     </div>
   );
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  HEADER — nav links on RIGHT, next to existing action buttons
+//  HEADER
 // ═══════════════════════════════════════════════════════════════
-const Header = ({page, nav, dark, setDark}) => {
-  const {history} = useHistory();
-  const [mob, setMob] = useState(false);
-  const cnt = history.length;
-
-  const NavLink = ({id, icon, lbl}) => (
-    <button className={`h-nl ${page===id?"on":""}`} onClick={()=>{nav(id);setMob(false);}}>
-      {icon && <span style={{marginRight:3}}>{icon}</span>}{lbl}
-      {id==="history" && cnt>0 && <span className="h-cnt" style={{marginLeft:4}}>{cnt}</span>}
-    </button>
-  );
-
-  return (
+const Header = ({page,nav,dark,setDark}) => {
+  const {history}=useHistory();
+  const [mob,setMob]=useState(false);
+  const cnt=history.length;
+  const NavLink=({id,icon,lbl})=>(<button className={`h-nl ${page===id?"on":""}`} onClick={()=>{nav(id);setMob(false);}}>{icon&&<span style={{marginRight:3}}>{icon}</span>}{lbl}{id==="history"&&cnt>0&&<span className="h-cnt" style={{marginLeft:4}}>{cnt}</span>}</button>);
+  return(
     <>
       <header>
-        {/* Logo — left side */}
-        <div className="h-logo" onClick={()=>nav("home")}>
-          <div className="h-logo-icon">Q</div>
-          <span className="h-logo-txt">QR LAB AI</span>
-        </div>
-
-        {/* ALL controls on right */}
+        <div className="h-logo" onClick={()=>nav("home")}><div className="h-logo-icon">Q</div><span className="h-logo-txt">QR LAB AI</span></div>
         <div className="h-actions">
-          {/* Nav links — same area as buttons, right side */}
           <nav className="h-nav" style={{marginRight:6}}>
-            <NavLink id="home" lbl="Home"/>
-            <NavLink id="generate" lbl="Generate"/>
-            <NavLink id="scan" lbl="Scan"/>
-            <NavLink id="history" lbl="History"/>
+            <NavLink id="home" lbl="Home"/><NavLink id="generate" lbl="Generate"/><NavLink id="scan" lbl="Scan"/><NavLink id="history" lbl="History"/>
           </nav>
-
-          {/* Divider */}
           <div className="h-divider h-desk-only"/>
-
-          {/* Theme toggle */}
-          <button className="h-btn" onClick={()=>setDark(d=>!d)} title="Toggle theme">
-            {dark?"☀️":"🌙"}
-          </button>
-
-          {/* Generate CTA — primary gold */}
-          <button className="h-btn h-btn-primary h-desk-only" onClick={()=>nav("generate")}>
-            ✦ Generate
-          </button>
-
-          {/* Hamburger — mobile only */}
-          <button className="h-btn" id="mob-tog" style={{display:"none"}} onClick={()=>setMob(v=>!v)}>
-            {mob?"✕":"☰"}
-          </button>
+          <button className="h-btn" onClick={()=>setDark(d=>!d)}>{dark?"☀️":"🌙"}</button>
+          <button className="h-btn h-btn-primary h-desk-only" onClick={()=>nav("generate")}>✦ Generate</button>
+          <button className="h-btn" id="mob-tog" style={{display:"none"}} onClick={()=>setMob(v=>!v)}>{mob?"✕":"☰"}</button>
           <style>{`@media(max-width:768px){#mob-tog{display:flex!important}}`}</style>
         </div>
       </header>
-
-      {/* Mobile dropdown */}
-      {mob && (
-        <div className="mob-menu">
-          <NavLink id="home" icon="🏠" lbl="Home"/>
-          <NavLink id="generate" icon="⚡" lbl="Generate QR"/>
-          <NavLink id="scan" icon="📷" lbl="Scan"/>
-          <NavLink id="history" icon="📋" lbl="History"/>
-        </div>
-      )}
+      {mob&&<div className="mob-menu"><NavLink id="home" icon="🏠" lbl="Home"/><NavLink id="generate" icon="⚡" lbl="Generate QR"/><NavLink id="scan" icon="📷" lbl="Scan"/><NavLink id="history" icon="📋" lbl="History"/></div>}
     </>
   );
 };
 
-// ═══════════════════════════════════════════════════════════════
-//  STICKY FABs (bottom-left)
-// ═══════════════════════════════════════════════════════════════
 const StickyFABs = ({nav}) => (
   <div className="fab-wrap">
-    <button className="fab fab-scan" onClick={()=>nav("scan")} title="Scan QR">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="4 7 4 4 7 4"/><polyline points="17 4 20 4 20 7"/>
-        <polyline points="4 17 4 20 7 20"/><polyline points="17 20 20 20 20 17"/>
-        <line x1="4" y1="12" x2="20" y2="12"/>
-      </svg>
-      <span className="fab-tip">Scan QR</span>
-    </button>
-    <button className="fab fab-gen" onClick={()=>nav("generate")} title="Generate QR">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#080808" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
-        <rect x="3" y="14" width="7" height="7" rx="1"/>
-        <line x1="14" y1="14" x2="14" y2="21"/><line x1="14" y1="17.5" x2="21" y2="17.5"/><line x1="21" y1="14" x2="21" y2="21"/>
-      </svg>
-      <span className="fab-tip">Generate QR</span>
-    </button>
+    <button className="fab fab-scan" onClick={()=>nav("scan")}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="4 7 4 4 7 4"/><polyline points="17 4 20 4 20 7"/><polyline points="4 17 4 20 7 20"/><polyline points="17 20 20 20 20 17"/><line x1="4" y1="12" x2="20" y2="12"/></svg><span className="fab-tip">Scan QR</span></button>
+    <button className="fab fab-gen" onClick={()=>nav("generate")}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#080808" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><line x1="14" y1="14" x2="14" y2="21"/><line x1="14" y1="17.5" x2="21" y2="17.5"/><line x1="21" y1="14" x2="21" y2="21"/></svg><span className="fab-tip">Generate QR</span></button>
   </div>
 );
 
 const Lbl = ({t}) => <label style={{fontSize:".71rem",color:"var(--mu)",fontWeight:600,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:".06em"}}>{t}</label>;
 
-// ═══════════════════════════════════════════════════════════════
-//  BG IMAGE PICKER
-// ═══════════════════════════════════════════════════════════════
-const BgImagePicker = ({bgImage, setBgImage, bgOpacity, setBgOpacity}) => {
+const BgImagePicker = ({bgImage,setBgImage,bgOpacity,setBgOpacity}) => {
   const [ov,setOv]=useState(false); const ref=useRef(null);
   const handleFile=f=>{if(!f?.type.startsWith("image/"))return;const r=new FileReader();r.onload=e=>setBgImage(e.target.result);r.readAsDataURL(f);};
-  return (
+  return(
     <div>
       <Lbl t="QR Background Image (Optional)"/>
       <div className={`dz ${ov?"ov":""}`} style={{padding:"11px"}} onDragOver={e=>{e.preventDefault();setOv(true);}} onDragLeave={()=>setOv(false)} onDrop={e=>{e.preventDefault();setOv(false);handleFile(e.dataTransfer.files[0]);}} onClick={()=>ref.current?.click()}>
-        {bgImage
-          ?<div style={{display:"flex",alignItems:"center",gap:9}}>
-            <img src={bgImage} style={{width:46,height:46,objectFit:"cover",borderRadius:7,border:"1px solid var(--br)",flexShrink:0}} alt=""/>
-            <div style={{flex:1,minWidth:0}}><div style={{fontWeight:600,fontSize:".83rem"}}>Background set ✓</div><div className="mu" style={{fontSize:".71rem"}}>Blended behind QR • click to change</div></div>
-            <button onClick={e=>{e.stopPropagation();setBgImage(null);}} style={{background:"rgba(239,68,68,.12)",border:"1px solid rgba(239,68,68,.28)",color:"#ef4444",borderRadius:6,padding:"3px 7px",cursor:"pointer",fontSize:".71rem",flexShrink:0}}>✕</button>
-          </div>
-          :<div><div style={{fontSize:"1.3rem",marginBottom:3}}>🌄</div><div className="mu" style={{fontSize:".82rem"}}>Drag & drop or click — shown as QR background</div><div className="mu" style={{fontSize:".7rem",marginTop:2}}>PNG · JPG · WebP</div></div>
-        }
+        {bgImage?<div style={{display:"flex",alignItems:"center",gap:9}}><img src={bgImage} style={{width:46,height:46,objectFit:"cover",borderRadius:7,border:"1px solid var(--br)",flexShrink:0}} alt=""/><div style={{flex:1,minWidth:0}}><div style={{fontWeight:600,fontSize:".83rem"}}>Background set ✓</div><div className="mu" style={{fontSize:".71rem"}}>Blended behind QR • click to change</div></div><button onClick={e=>{e.stopPropagation();setBgImage(null);}} style={{background:"rgba(239,68,68,.12)",border:"1px solid rgba(239,68,68,.28)",color:"#ef4444",borderRadius:6,padding:"3px 7px",cursor:"pointer",fontSize:".71rem",flexShrink:0}}>✕</button></div>
+        :<div><div style={{fontSize:"1.3rem",marginBottom:3}}>🌄</div><div className="mu" style={{fontSize:".82rem"}}>Drag & drop or click — shown as QR background</div><div className="mu" style={{fontSize:".7rem",marginTop:2}}>PNG · JPG · WebP</div></div>}
         <input ref={ref} type="file" accept="image/*" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
       </div>
-      {bgImage&&<div style={{marginTop:9}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}><span style={{fontSize:".7rem",color:"var(--mu)",fontWeight:600,textTransform:"uppercase",letterSpacing:".06em"}}>Image Visibility</span><span style={{fontSize:".78rem",color:"var(--au)",fontWeight:700}}>{Math.round(bgOpacity*100)}%</span></div>
-        <input type="range" className="range-inp" min="0.1" max="0.75" step="0.01" value={bgOpacity} onChange={e=>setBgOpacity(parseFloat(e.target.value))}/>
-        <div style={{display:"flex",justifyContent:"space-between",marginTop:2}}><span className="mu" style={{fontSize:".66rem"}}>Subtle</span><span className="mu" style={{fontSize:".66rem"}}>Full Visible</span></div>
-      </div>}
+      {bgImage&&<div style={{marginTop:9}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}><span style={{fontSize:".7rem",color:"var(--mu)",fontWeight:600,textTransform:"uppercase",letterSpacing:".06em"}}>Image Visibility</span><span style={{fontSize:".78rem",color:"var(--au)",fontWeight:700}}>{Math.round(bgOpacity*100)}%</span></div><input type="range" className="range-inp" min="0.1" max="0.75" step="0.01" value={bgOpacity} onChange={e=>setBgOpacity(parseFloat(e.target.value))}/><div style={{display:"flex",justifyContent:"space-between",marginTop:2}}><span className="mu" style={{fontSize:".66rem"}}>Subtle</span><span className="mu" style={{fontSize:".66rem"}}>Full Visible</span></div></div>}
     </div>
   );
 };
@@ -716,12 +417,7 @@ const BgImagePicker = ({bgImage, setBgImage, bgOpacity, setBgOpacity}) => {
 //  HOME
 // ═══════════════════════════════════════════════════════════════
 const Home = ({nav}) => {
-  const steps=[
-    {n:"1",t:"Input",d:"Enter your URL, text, contact info, WiFi credentials, or any content to encode.",ic:"✏️"},
-    {n:"2",t:"Encode",d:"Your data is encoded with Reed-Solomon error correction for maximum scan reliability.",ic:"⚙️"},
-    {n:"3",t:"Design",d:"Pick shape, colors, upload a background image and add a logo overlay for branding.",ic:"🎨"},
-    {n:"4",t:"Export",d:"Download PNG or SVG. Share via link — ready for print, digital, or social media.",ic:"⬇️"},
-  ];
+  const steps=[{n:"1",t:"Input",d:"Enter your URL, text, contact info, WiFi credentials, or any content to encode.",ic:"✏️"},{n:"2",t:"Encode",d:"Your data is encoded with Reed-Solomon error correction for maximum scan reliability.",ic:"⚙️"},{n:"3",t:"Design",d:"Pick shape, colors, upload a background image and add a logo overlay for branding.",ic:"🎨"},{n:"4",t:"Export",d:"Download PNG or SVG. Share via link — ready for print, digital, or social media.",ic:"⬇️"}];
   const [cUrl,setCUrl]=useState("https://qrlab.ai");
   const [cFg,setCFg]=useState("#000000");const[cBg,setCBg]=useState("#ffffff");
   const [cShape,setCShape]=useState("square");const[cFrame,setCFrame]=useState("round");
@@ -736,10 +432,8 @@ const Home = ({nav}) => {
   const initRef=useRef(true);
   useEffect(()=>{if(initRef.current){initRef.current=false;build();return;}build();},[cFg,cBg,cShape]);
   const handleLogoFile=f=>{if(!f?.type.startsWith("image/"))return;const r=new FileReader();r.onload=e=>{setCLogo(e.target.result);setTimeout(build,100);};r.readAsDataURL(f);};
-
-  return (
+  return(
     <div>
-      {/* HERO */}
       <section style={{minHeight:"100vh",display:"flex",alignItems:"center",padding:"90px 40px 56px",position:"relative",zIndex:1,background:"radial-gradient(ellipse at 60% 50%,rgba(245,166,35,.1) 0%,transparent 64%)"}}>
         <div className="hero-grid" style={{maxWidth:1160,margin:"0 auto",width:"100%",display:"grid",gridTemplateColumns:"1fr 1fr",gap:52,alignItems:"center"}}>
           <div style={{animation:"sup .8s ease forwards",opacity:0}}>
@@ -754,8 +448,6 @@ const Home = ({nav}) => {
           <div className="hero-qr-wrap" style={{display:"flex",justifyContent:"center",animation:"fin 1s ease .35s forwards",opacity:0}}><HeroQR/></div>
         </div>
       </section>
-
-      {/* LIVE CUSTOMIZER */}
       <section style={{padding:"72px 40px",position:"relative",zIndex:1}}>
         <div style={{maxWidth:1160,margin:"0 auto"}}>
           <div style={{textAlign:"center",marginBottom:44}}>
@@ -765,13 +457,7 @@ const Home = ({nav}) => {
           </div>
           <div className="two-col" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
             <div className="card" style={{borderRadius:20,padding:22,display:"flex",flexDirection:"column",gap:14}}>
-              <div>
-                <Lbl t="Content / URL"/>
-                <div style={{display:"flex",gap:7}}>
-                  <input value={cUrl} onChange={e=>setCUrl(e.target.value)} onKeyDown={e=>e.key==="Enter"&&build()} placeholder="https://yoursite.com"/>
-                  <button className="gbtn" style={{borderRadius:10,padding:"0 14px",fontSize:".86rem",whiteSpace:"nowrap",flexShrink:0}} onClick={build} disabled={cBusy}>{cBusy?<div className="spin"/>:"↻"}</button>
-                </div>
-              </div>
+              <div><Lbl t="Content / URL"/><div style={{display:"flex",gap:7}}><input value={cUrl} onChange={e=>setCUrl(e.target.value)} onKeyDown={e=>e.key==="Enter"&&build()} placeholder="https://yoursite.com"/><button className="gbtn" style={{borderRadius:10,padding:"0 14px",fontSize:".86rem",whiteSpace:"nowrap",flexShrink:0}} onClick={build} disabled={cBusy}>{cBusy?<div className="spin"/>:"↻"}</button></div></div>
               <div><Lbl t="Shape"/><div style={{display:"flex",gap:6}}>{shapes.map(s=><button key={s.id} onClick={()=>setCShape(s.id)} style={{flex:1,padding:"8px 4px",borderRadius:9,cursor:"pointer",fontSize:".74rem",border:`1px solid ${cShape===s.id?"var(--au)":"var(--br)"}`,background:cShape===s.id?"rgba(245,166,35,.13)":"transparent",color:cShape===s.id?"var(--au)":"var(--mu)",fontWeight:cShape===s.id?700:400,transition:"all .2s"}}><div style={{fontSize:"1rem",marginBottom:2}}>{s.ic}</div>{s.l}</button>)}</div></div>
               <div><Lbl t="Frame"/><div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{frames.map(f=><button key={f.id} onClick={()=>setCFrame(f.id)} style={{padding:"6px 11px",borderRadius:8,cursor:"pointer",fontSize:".75rem",border:`1px solid ${cFrame===f.id?"var(--au)":"var(--br)"}`,background:cFrame===f.id?"rgba(245,166,35,.13)":"transparent",color:cFrame===f.id?"var(--au)":"var(--mu)",fontWeight:cFrame===f.id?700:400,transition:"all .2s"}}>{f.l}</button>)}</div></div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
@@ -779,14 +465,7 @@ const Home = ({nav}) => {
                 <div><Lbl t="BG Color"/><div style={{display:"flex",flexWrap:"wrap",gap:4,alignItems:"center"}}>{bgPal.map(c=><div key={c} className={`sw ${cBg===c?"on":""}`} style={{background:c,border:"2px solid rgba(150,150,150,.18)"}} onClick={()=>setCBg(c)}/>)}<input type="color" value={cBg} onChange={e=>setCBg(e.target.value)} style={{width:23,height:23,padding:1,borderRadius:4,cursor:"pointer",border:"2px solid var(--br)"}}/></div></div>
               </div>
               <BgImagePicker bgImage={cBgImg} setBgImage={v=>{setCBgImg(v);setTimeout(build,60);}} bgOpacity={cBgOp} setBgOpacity={v=>{setCBgOp(v);setTimeout(build,60);}}/>
-              <div>
-                <Lbl t="Logo (Optional)"/>
-                <div className={`dz ${logOv?"ov":""}`} style={{padding:"11px"}} onDragOver={e=>{e.preventDefault();setLogOv(true);}} onDragLeave={()=>setLogOv(false)} onDrop={e=>{e.preventDefault();setLogOv(false);handleLogoFile(e.dataTransfer.files[0]);}} onClick={()=>logoRef.current?.click()}>
-                  {cLogo?<div style={{display:"flex",alignItems:"center",gap:9}}><img src={cLogo} style={{width:36,height:36,objectFit:"contain",borderRadius:6}} alt=""/><div style={{flex:1}}><div style={{fontWeight:600,fontSize:".83rem"}}>Logo set ✓</div><div className="mu" style={{fontSize:".71rem"}}>Click to change</div></div><button onClick={e=>{e.stopPropagation();setCLogo(null);}} style={{background:"rgba(239,68,68,.12)",border:"1px solid rgba(239,68,68,.28)",color:"#ef4444",borderRadius:5,padding:"3px 7px",cursor:"pointer",fontSize:".71rem"}}>✕</button></div>
-                  :<div><div style={{fontSize:"1rem",marginBottom:2}}>🖼️</div><div className="mu" style={{fontSize:".81rem"}}>Drag & drop or click to add logo</div></div>}
-                  <input ref={logoRef} type="file" accept="image/*" style={{display:"none"}} onChange={e=>handleLogoFile(e.target.files[0])}/>
-                </div>
-              </div>
+              <div><Lbl t="Logo (Optional)"/><div className={`dz ${logOv?"ov":""}`} style={{padding:"11px"}} onDragOver={e=>{e.preventDefault();setLogOv(true);}} onDragLeave={()=>setLogOv(false)} onDrop={e=>{e.preventDefault();setLogOv(false);handleLogoFile(e.dataTransfer.files[0]);}} onClick={()=>logoRef.current?.click()}>{cLogo?<div style={{display:"flex",alignItems:"center",gap:9}}><img src={cLogo} style={{width:36,height:36,objectFit:"contain",borderRadius:6}} alt=""/><div style={{flex:1}}><div style={{fontWeight:600,fontSize:".83rem"}}>Logo set ✓</div><div className="mu" style={{fontSize:".71rem"}}>Click to change</div></div><button onClick={e=>{e.stopPropagation();setCLogo(null);}} style={{background:"rgba(239,68,68,.12)",border:"1px solid rgba(239,68,68,.28)",color:"#ef4444",borderRadius:5,padding:"3px 7px",cursor:"pointer",fontSize:".71rem"}}>✕</button></div>:<div><div style={{fontSize:"1rem",marginBottom:2}}>🖼️</div><div className="mu" style={{fontSize:".81rem"}}>Drag & drop or click to add logo</div></div>}<input ref={logoRef} type="file" accept="image/*" style={{display:"none"}} onChange={e=>handleLogoFile(e.target.files[0])}/></div></div>
             </div>
             <div className="card" style={{borderRadius:20,padding:22,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14,minHeight:460}}>
               <p style={{fontSize:".7rem",color:"var(--mu)",fontWeight:700,textTransform:"uppercase",letterSpacing:".1em"}}>Live Preview</p>
@@ -806,37 +485,15 @@ const Home = ({nav}) => {
           </div>
         </div>
       </section>
-
-      {/* HOW IT WORKS */}
-      <section style={{padding:"80px 40px",position:"relative",zIndex:1,background:"radial-gradient(ellipse at 50% 100%,rgba(245,166,35,.06) 0%,transparent 68%)"}}>
+      <section style={{padding:"80px 40px",position:"relative",zIndex:1}}>
         <div style={{maxWidth:1060,margin:"0 auto"}}>
-          <div style={{textAlign:"center",marginBottom:52}}>
-            <div className="badge" style={{display:"inline-flex",marginBottom:14}}>✦ How it works</div>
-            <h2 style={{fontSize:"clamp(1.9rem,4vw,2.9rem)",fontWeight:800,marginBottom:12}}>QR Generation <span className="gtext">Workflow</span></h2>
-            <p className="mu" style={{maxWidth:460,margin:"0 auto",fontSize:".97rem",lineHeight:1.6}}>From content to scannable QR code in seconds.</p>
-          </div>
-          <div className="steps-row">
-            {steps.map((s,i)=>(
-              <React.Fragment key={s.n}>
-                <div className="step-card" style={{animation:`sup .55s ease ${i*.13}s forwards`,opacity:0}}>
-                  <div style={{fontSize:"2rem",marginBottom:12}}>{s.ic}</div>
-                  <div className="sc">{s.n}</div>
-                  <h3 style={{fontWeight:700,marginBottom:9,fontSize:"1rem"}}>{s.t}</h3>
-                  <p className="mu" style={{fontSize:".85rem",lineHeight:1.68,flex:1}}>{s.d}</p>
-                </div>
-                {i<3&&<div className="step-arrow">→</div>}
-              </React.Fragment>
-            ))}
-          </div>
+          <div style={{textAlign:"center",marginBottom:52}}><div className="badge" style={{display:"inline-flex",marginBottom:14}}>✦ How it works</div><h2 style={{fontSize:"clamp(1.9rem,4vw,2.9rem)",fontWeight:800,marginBottom:12}}>QR Generation <span className="gtext">Workflow</span></h2><p className="mu" style={{maxWidth:460,margin:"0 auto",fontSize:".97rem",lineHeight:1.6}}>From content to scannable QR code in seconds.</p></div>
+          <div className="steps-row">{steps.map((s,i)=>(<React.Fragment key={s.n}><div className="step-card" style={{animation:`sup .55s ease ${i*.13}s forwards`,opacity:0}}><div style={{fontSize:"2rem",marginBottom:12}}>{s.ic}</div><div className="sc">{s.n}</div><h3 style={{fontWeight:700,marginBottom:9,fontSize:"1rem"}}>{s.t}</h3><p className="mu" style={{fontSize:".85rem",lineHeight:1.68,flex:1}}>{s.d}</p></div>{i<3&&<div className="step-arrow">→</div>}</React.Fragment>))}</div>
         </div>
       </section>
-
-      {/* CTA */}
       <section style={{padding:"72px 40px",position:"relative",zIndex:1}}>
         <div style={{maxWidth:680,margin:"0 auto"}}>
           <div className="card" style={{borderRadius:26,padding:"clamp(32px,6vw,60px) clamp(22px,5vw,48px)",textAlign:"center",boxShadow:"0 0 72px rgba(245,166,35,.09)",border:"1px solid rgba(245,166,35,.11)",position:"relative",overflow:"hidden"}}>
-            <div style={{position:"absolute",top:-50,right:-50,width:180,height:180,borderRadius:"50%",background:"radial-gradient(circle,rgba(245,166,35,.11) 0%,transparent 70%)",pointerEvents:"none"}}/>
-            <div style={{position:"absolute",bottom:-36,left:-36,width:140,height:140,borderRadius:"50%",background:"radial-gradient(circle,rgba(245,166,35,.07) 0%,transparent 70%)",pointerEvents:"none"}}/>
             <div className="badge" style={{display:"inline-flex",marginBottom:16}}>✦ Free to Start</div>
             <h2 style={{fontSize:"clamp(1.8rem,4.5vw,2.9rem)",fontWeight:800,marginBottom:12}}>Ready to go <span className="gtext">QR?</span></h2>
             <p className="mu" style={{fontSize:".97rem",lineHeight:1.62,maxWidth:380,margin:"0 auto 26px"}}>Start creating beautiful, scannable QR codes — free, no sign-up needed.</p>
@@ -861,29 +518,35 @@ const Generate = () => {
   const [fg,setFg]=useState("#000000");const[bg,setBg]=useState("#ffffff");
   const [shape,setShape]=useState("square");const[frame,setFrame]=useState("simple");
   const [logo,setLogo]=useState(null);const[bgImage,setBgImage]=useState(null);const[bgOpacity,setBgOpacity]=useState(0.35);
-  const [logD,setLogD]=useState(false);const[cp,setCp]=useState(false);
-  const fRef=useRef(null);
+  const [cp,setCp]=useState(false);
+  const fRef=useRef(null);const[logD,setLogD]=useState(false);
   const tabs=["Link","Text","Email","Call","SMS","WiFi","WhatsApp","VCard","PDF","App"];
   const shapes=[{id:"square",ic:"◼",l:"Square"},{id:"rounded",ic:"▢",l:"Rounded"},{id:"dots",ic:"⬡",l:"Dots"}];
   const frames=[{id:"none",l:"None"},{id:"simple",l:"Simple"},{id:"round",l:"Rounded"},{id:"shadow",l:"Shadow"},{id:"gold",l:"Gold"}];
   const fgPal=["#000000","#1a1a2e","#0f3460","#7c3aed","#ef4444","#f5a623","#16a34a","#0ea5e9"];
   const bgPal=["#ffffff","#fffde7","#e8f5e9","#e3f2fd","#fce4ec","#f3e5f5","#fff7ed","#f8f8f8"];
   const hints={Link:"https://yourwebsite.com",Text:"Enter your message…",Email:"user@example.com",Call:"+1 234 567 8900",SMS:"+1 234 567 8900",WiFi:"SSID:password",WhatsApp:"+1 234 567 8900",VCard:"Name: John Doe\nPhone: +1234",PDF:"https://example.com/file.pdf",App:"https://apps.apple.com/…"};
-  const gen=useCallback(async()=>{setErr(null);const t=text.trim()||(tab==="Link"?"https://qrlab.ai":`${tab}: demo`);setBusy(true);try{const url=await generateQR(t,{size:300,fg,bg,shape,logo,bgImage,bgOpacity});setQr(url);addToHistory({id:Date.now(),type:tab,content:t,dataURL:url,date:new Date().toLocaleString(),shape,frame,hasBgImage:!!bgImage});}catch(e){setErr("Error: "+e.message);}setBusy(false);},[text,fg,bg,shape,tab,logo,bgImage,bgOpacity,addToHistory,frame]);
+  const gen=useCallback(async()=>{
+    setErr(null);
+    const t=text.trim()||(tab==="Link"?"https://qrlab.ai":`${tab}: demo`);
+    setBusy(true);
+    try{
+      const url=await generateQR(t,{size:300,fg,bg,shape,logo,bgImage,bgOpacity});
+      setQr(url);
+      addToHistory({id:Date.now(),type:tab,content:t,dataURL:url,date:new Date().toLocaleString(),shape,frame,hasBgImage:!!bgImage});
+    }catch(e){setErr("Generation failed: "+e.message);}
+    setBusy(false);
+  },[text,fg,bg,shape,tab,logo,bgImage,bgOpacity,addToHistory,frame]);
   const dlPNG=()=>{if(!qr)return;const a=document.createElement("a");a.href=qr;a.download="qrlab.png";a.click();};
   const dlSVG=()=>{if(!qr)return;const sv=`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="300" height="300"><image href="${qr}" width="300" height="300"/></svg>`;const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([sv],{type:"image/svg+xml"}));a.download="qrlab.svg";a.click();};
   const logF=f=>{if(!f?.type.startsWith("image/"))return;const r=new FileReader();r.onload=e=>setLogo(e.target.result);r.readAsDataURL(f);};
-  return (
+  return(
     <div style={{minHeight:"100vh",paddingTop:80,paddingBottom:56,position:"relative",zIndex:1}}>
       <div className="page-wrap" style={{maxWidth:1160,margin:"0 auto",padding:"0 22px"}}>
-        <div style={{textAlign:"center",marginBottom:34}}>
-          <div className="badge" style={{display:"inline-flex",marginBottom:10}}>⚡ QR Generator</div>
-          <h1 style={{fontSize:"clamp(1.8rem,5vw,2.9rem)",fontWeight:800,marginBottom:7}}>Create Your <span className="gtext">QR Code</span></h1>
-          <p className="mu" style={{fontSize:".93rem"}}>Colors, shapes, background images, logos — fully customizable & scannable.</p>
-        </div>
+        <div style={{textAlign:"center",marginBottom:34}}><div className="badge" style={{display:"inline-flex",marginBottom:10}}>⚡ QR Generator</div><h1 style={{fontSize:"clamp(1.8rem,5vw,2.9rem)",fontWeight:800,marginBottom:7}}>Create Your <span className="gtext">QR Code</span></h1><p className="mu" style={{fontSize:".93rem"}}>Colors, shapes, background images, logos — fully customizable & scannable.</p></div>
         <div className="two-col" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:18}}>
           <div className="card" style={{borderRadius:20,padding:20,display:"flex",flexDirection:"column",gap:13}}>
-            <div className="tab-scroll" style={{display:"flex",gap:4,flexWrap:"wrap"}}>{tabs.map(t=><button key={t} className={`tb ${tab===t?"on":""}`} onClick={()=>setTab(t)}>{t}</button>)}</div>
+            <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{tabs.map(t=><button key={t} className={`tb ${tab===t?"on":""}`} onClick={()=>setTab(t)}>{t}</button>)}</div>
             <div><Lbl t="Content"/><textarea value={text} onChange={e=>setText(e.target.value)} placeholder={hints[tab]} rows={3} style={{resize:"vertical"}}/></div>
             <div><Lbl t="Shape"/><div style={{display:"flex",gap:6}}>{shapes.map(s=><button key={s.id} onClick={()=>setShape(s.id)} style={{flex:1,padding:"7px 4px",borderRadius:9,cursor:"pointer",fontSize:".73rem",border:`1px solid ${shape===s.id?"var(--au)":"var(--br)"}`,background:shape===s.id?"rgba(245,166,35,.12)":"transparent",color:shape===s.id?"var(--au)":"var(--mu)",fontWeight:shape===s.id?700:400,transition:"all .2s"}}><div style={{fontSize:".95rem",marginBottom:2}}>{s.ic}</div>{s.l}</button>)}</div></div>
             <div><Lbl t="Frame"/><div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{frames.map(f=><button key={f.id} onClick={()=>setFrame(f.id)} style={{padding:"5px 10px",borderRadius:7,cursor:"pointer",fontSize:".74rem",border:`1px solid ${frame===f.id?"var(--au)":"var(--br)"}`,background:frame===f.id?"rgba(245,166,35,.12)":"transparent",color:frame===f.id?"var(--au)":"var(--mu)",fontWeight:frame===f.id?700:400,transition:"all .2s"}}>{f.l}</button>)}</div></div>
@@ -921,142 +584,122 @@ const Generate = () => {
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  SCAN
+//  SCAN — fixed: reliable jsQR loading + stable video rendering
 // ═══════════════════════════════════════════════════════════════
 const Scan = () => {
-  const mountRef  = useRef(null); // div where we inject the video
-  const stateRef  = useRef({});   // holds video, canvas, stream, interval — never stale
-  const fileRef   = useRef(null);
+  const videoRef = useRef(null);        // actual <video> element via ref
+  const canvasRef = useRef(null);       // offscreen canvas ref
+  const streamRef = useRef(null);
+  const intervalRef = useRef(null);
+  const fileRef = useRef(null);
 
-  const [phase,   setPhase]  = useState("idle");
-  const [result,  setResult] = useState(null);
-  const [err,     setErr]    = useState(null);
-  const [copied,  setCopied] = useState(false);
+  const [phase, setPhase] = useState("idle");   // idle | loading | scanning | result | error
+  const [result, setResult] = useState(null);
+  const [err, setErr] = useState(null);
+  const [copied, setCopied] = useState(false);
 
-  /* ── teardown ── */
-  const teardown = useCallback(() => {
-    const s = stateRef.current;
-    if (s.interval) { clearInterval(s.interval); s.interval = null; }
-    if (s.stream)   { s.stream.getTracks().forEach(t => t.stop()); s.stream = null; }
-    if (s.video)    { s.video.srcObject = null; s.video.remove(); s.video = null; }
-    if (s.canvas)   { s.canvas = null; }
+  // Load jsQR with multiple CDN fallbacks
+  const loadJsQR = useCallback(() => {
+    return new Promise((resolve, reject) => {
+      if (window.jsQR) { resolve(); return; }
+      const urls = [
+        "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.3.1/jsQR.min.js",
+      ];
+      let idx = 0;
+      const tryNext = () => {
+        if (idx >= urls.length) { reject(new Error("jsQR could not be loaded")); return; }
+        const sc = document.createElement("script");
+        sc.src = urls[idx++];
+        sc.onload = () => window.jsQR ? resolve() : tryNext();
+        sc.onerror = tryNext;
+        document.head.appendChild(sc);
+      };
+      tryNext();
+    });
   }, []);
 
-  useEffect(() => () => teardown(), [teardown]);
+  const stopScan = useCallback(() => {
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+    if (videoRef.current) { videoRef.current.srcObject = null; }
+  }, []);
 
-  /* ── start ── */
+  useEffect(() => () => stopScan(), [stopScan]);
+
   const startScan = useCallback(async () => {
-    teardown();
+    stopScan();
     setErr(null); setResult(null); setPhase("loading");
 
-    /* 1 ── load jsQR */
-    if (!window.jsQR) {
-      try {
-        await new Promise((ok, fail) => {
-          const sc = document.createElement("script");
-          sc.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js";
-          sc.onload = ok;
-          sc.onerror = () => fail(new Error("jsQR load failed"));
-          document.head.appendChild(sc);
-        });
-      } catch(e) { setErr("Could not load QR library."); setPhase("error"); return; }
-    }
+    try { await loadJsQR(); }
+    catch(e) { setErr("Could not load QR library. Check your connection."); setPhase("error"); return; }
 
-    /* 2 ── camera */
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal:"environment" }, width:{ideal:1280}, height:{ideal:720} },
-        audio: false
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
       });
     } catch(e1) {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      } catch(e2) {
-        setErr("Camera denied or unavailable. Please grant camera permission and try again.");
-        setPhase("error"); return;
-      }
+      try { stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); }
+      catch(e2) { setErr("Camera denied or unavailable. Please grant camera permission."); setPhase("error"); return; }
     }
 
-    /* 3 ── create video element and inject it into the mount div */
-    const video = document.createElement("video");
-    video.setAttribute("playsinline", "");
-    video.setAttribute("muted", "");
-    video.muted = true;
-    video.style.cssText = "width:100%;height:100%;object-fit:cover;display:block;border-radius:12px;";
-    video.srcObject = stream;
+    streamRef.current = stream;
 
-    const mount = mountRef.current;
-    if (!mount) { stream.getTracks().forEach(t=>t.stop()); return; }
-    mount.innerHTML = "";
-    mount.appendChild(video);
-
-    /* 4 ── play */
-    try { await video.play(); } catch(_) {}
-
-    /* 5 ── wait for real frames */
-    await new Promise(ok => {
-      const check = () => {
-        if (video.readyState >= 2 && video.videoWidth > 0) { ok(); return; }
-        setTimeout(check, 100);
-      };
-      check();
-    });
-
-    /* 6 ── canvas */
-    const canvas = document.createElement("canvas");
-
-    stateRef.current = { video, canvas, stream, interval: null };
+    // Give React a tick to render the <video> element before assigning srcObject
     setPhase("scanning");
 
-    /* 7 ── decode loop every 300ms */
-    stateRef.current.interval = setInterval(() => {
-      const { video: v, canvas: c } = stateRef.current;
-      if (!v || !c || !window.jsQR) return;
-      if (!v.videoWidth || !v.videoHeight || v.paused || v.ended) return;
+    // Use setTimeout to ensure the video element is mounted
+    setTimeout(() => {
+      const video = videoRef.current;
+      if (!video) { stopScan(); setPhase("idle"); return; }
 
-      c.width  = v.videoWidth;
-      c.height = v.videoHeight;
-      const ctx = c.getContext("2d");
-      ctx.drawImage(v, 0, 0, c.width, c.height);
+      video.srcObject = stream;
+      video.setAttribute("playsinline", "true");
+      video.muted = true;
 
+      video.play().catch(() => {});
+
+      // Wait for video to have real frame data
+      const waitForFrames = () => {
+        if (video.readyState >= 2 && video.videoWidth > 0) {
+          startDecoding(video);
+        } else {
+          setTimeout(waitForFrames, 120);
+        }
+      };
+      waitForFrames();
+    }, 100);
+  }, [loadJsQR, stopScan]);
+
+  const startDecoding = (video) => {
+    const canvas = canvasRef.current || document.createElement("canvas");
+    intervalRef.current = setInterval(() => {
+      if (!video || !window.jsQR) return;
+      if (!video.videoWidth || video.paused || video.ended) return;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       let imgData;
-      try { imgData = ctx.getImageData(0, 0, c.width, c.height); }
-      catch(_) { return; }
-
-      const qr = window.jsQR(imgData.data, imgData.width, imgData.height, {
-        inversionAttempts: "dontInvert"
-      });
-
+      try { imgData = ctx.getImageData(0, 0, canvas.width, canvas.height); } catch(_) { return; }
+      const qr = window.jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: "dontInvert" });
       if (qr && qr.data) {
-        clearInterval(stateRef.current.interval);
-        stateRef.current.interval = null;
-        stateRef.current.stream.getTracks().forEach(t => t.stop());
-        stateRef.current.stream = null;
+        clearInterval(intervalRef.current); intervalRef.current = null;
+        stopScan();
         setResult(qr.data);
         setPhase("result");
-        // clear the video DOM
-        if (mountRef.current) mountRef.current.innerHTML = "";
       }
     }, 300);
+  };
 
-  }, [teardown]);
+  const reset = useCallback(() => { stopScan(); setPhase("idle"); setResult(null); setErr(null); }, [stopScan]);
 
-  const stopScan = useCallback(() => { teardown(); setPhase("idle"); }, [teardown]);
-  const reset    = useCallback(() => { teardown(); setPhase("idle"); setResult(null); setErr(null); }, [teardown]);
-
-  /* ── scan from image ── */
   const scanFile = useCallback(async (file) => {
     if (!file) return;
     setErr(null); setResult(null);
-    if (!window.jsQR) {
-      await new Promise((ok, fail) => {
-        const sc = document.createElement("script");
-        sc.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js";
-        sc.onload = ok; sc.onerror = () => fail();
-        document.head.appendChild(sc);
-      }).catch(() => { setErr("Could not load QR library."); return; });
-    }
+    try { await loadJsQR(); } catch(e) { setErr("Could not load QR library."); return; }
     const img = new Image();
     img.onload = () => {
       const c = document.createElement("canvas");
@@ -1066,12 +709,12 @@ const Scan = () => {
       const id = ctx.getImageData(0, 0, c.width, c.height);
       const qr = window.jsQR(id.data, id.width, id.height, { inversionAttempts: "attemptBoth" });
       if (qr && qr.data) { setResult(qr.data); setPhase("result"); }
-      else setErr("No QR code found in this image. Try a clearer photo.");
+      else setErr("No QR code found in this image. Try a clearer photo with good lighting.");
       URL.revokeObjectURL(img.src);
     };
-    img.onerror = () => setErr("Could not read image.");
+    img.onerror = () => setErr("Could not read image file.");
     img.src = URL.createObjectURL(file);
-  }, []);
+  }, [loadJsQR]);
 
   const isLoading  = phase === "loading";
   const isScanning = phase === "scanning";
@@ -1080,153 +723,122 @@ const Scan = () => {
   return (
     <div style={{minHeight:"100vh",paddingTop:80,paddingBottom:56,position:"relative",zIndex:1}}>
       <div className="page-wrap" style={{maxWidth:520,margin:"0 auto",padding:"0 18px"}}>
-
         <div style={{textAlign:"center",marginBottom:26}}>
           <div className="badge" style={{display:"inline-flex",marginBottom:10}}>📷 QR Scanner</div>
           <h1 style={{fontSize:"clamp(1.8rem,5vw,2.7rem)",fontWeight:800,marginBottom:8}}>Scan <span className="gtext">QR Code</span></h1>
           <p className="mu">Point your camera at a QR code to decode it instantly.</p>
         </div>
-
         <div className="card" style={{borderRadius:20,padding:20,textAlign:"center"}}>
+          {/* Video viewport — always rendered, shown/hidden via CSS */}
+          <div style={{position:"relative",borderRadius:12,overflow:"hidden",background:"#060608",minHeight:290,marginBottom:14}}>
 
-          {/* viewport */}
-          <div style={{position:"relative",borderRadius:12,overflow:"hidden",background:"#060608",
-                       minHeight:290,marginBottom:14}}>
+            {/* The actual video element — always in DOM when scanning */}
+            <video
+              ref={videoRef}
+              playsInline
+              muted
+              style={{
+                width:"100%", height:"100%", minHeight:290,
+                objectFit:"cover", display: isScanning ? "block" : "none",
+                borderRadius:12,
+              }}
+            />
 
-            {/* ← video injected here by DOM directly */}
-            <div ref={mountRef} style={{
-              width:"100%", height:"100%", minHeight:290,
-              display: isScanning ? "block" : "none",
-              borderRadius:12, overflow:"hidden"
-            }}/>
-
-            {/* idle */}
+            {/* Idle state */}
             {phase === "idle" && (
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",
-                           justifyContent:"center",minHeight:290,gap:10}}>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:290,gap:10}}>
                 <div style={{fontSize:"3rem"}}>📷</div>
                 <p style={{color:"#7878a0",fontSize:".9rem"}}>Camera will appear here</p>
               </div>
             )}
 
-            {/* loading */}
+            {/* Loading */}
             {isLoading && (
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",
-                           justifyContent:"center",minHeight:290,gap:12}}>
-                <div style={{width:42,height:42,border:"3px solid rgba(245,166,35,.2)",
-                             borderTopColor:"var(--au)",borderRadius:"50%",
-                             animation:"spinning .7s linear infinite"}}/>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:290,gap:12}}>
+                <div style={{width:42,height:42,border:"3px solid rgba(245,166,35,.2)",borderTopColor:"var(--au)",borderRadius:"50%",animation:"spinning .7s linear infinite"}}/>
                 <p style={{color:"var(--au)",fontWeight:600,fontSize:".9rem"}}>Starting camera…</p>
               </div>
             )}
 
-            {/* scan overlay */}
+            {/* Scan overlay corners + sweep line */}
             {isScanning && (
               <>
-                <div style={{position:"absolute",left:0,right:0,height:2,top:0,
-                             background:"linear-gradient(90deg,transparent,var(--au),#fff,var(--au),transparent)",
-                             boxShadow:"0 0 10px var(--au)",
-                             animation:"scl 1.8s ease-in-out infinite",zIndex:10}}/>
+                <div style={{position:"absolute",left:0,right:0,height:2,top:0,background:"linear-gradient(90deg,transparent,var(--au),#fff,var(--au),transparent)",boxShadow:"0 0 10px var(--au)",animation:"scl 1.8s ease-in-out infinite",zIndex:10}}/>
                 {[["left","top"],["right","top"],["left","bottom"],["right","bottom"]].map(([h,v],i)=>(
                   <div key={i} style={{position:"absolute",[h]:12,[v]:12,width:28,height:28,zIndex:11,
-                    borderTop:    v==="top"    ?"3px solid var(--au)":"none",
-                    borderBottom: v==="bottom" ?"3px solid var(--au)":"none",
-                    borderLeft:   h==="left"   ?"3px solid var(--au)":"none",
-                    borderRight:  h==="right"  ?"3px solid var(--au)":"none",
-                    filter:"drop-shadow(0 0 4px var(--au))"}}/>
+                    borderTop:v==="top"?"3px solid var(--au)":"none",borderBottom:v==="bottom"?"3px solid var(--au)":"none",
+                    borderLeft:h==="left"?"3px solid var(--au)":"none",borderRight:h==="right"?"3px solid var(--au)":"none"}}/>
                 ))}
-                <div style={{position:"absolute",bottom:10,left:0,right:0,
-                             textAlign:"center",zIndex:11}}>
-                  <span style={{background:"rgba(0,0,0,.65)",color:"var(--au)",fontSize:".7rem",
-                                fontWeight:700,padding:"3px 12px",borderRadius:100,
-                                letterSpacing:".07em"}}>● SCANNING…</span>
+                <div style={{position:"absolute",bottom:10,left:0,right:0,textAlign:"center",zIndex:11}}>
+                  <span style={{background:"rgba(0,0,0,.65)",color:"var(--au)",fontSize:".7rem",fontWeight:700,padding:"3px 12px",borderRadius:100,letterSpacing:".07em"}}>● SCANNING…</span>
                 </div>
               </>
             )}
 
-            {/* result overlay */}
+            {/* Result */}
             {hasResult && (
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",
-                           justifyContent:"center",minHeight:290,gap:10,padding:20}}>
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:290,gap:10,padding:20}}>
                 <div style={{fontSize:"2.8rem"}}>✅</div>
-                <div style={{color:"var(--gn)",fontWeight:800,fontSize:"1rem",letterSpacing:".04em"}}>
-                  QR DETECTED!
-                </div>
-                <div style={{color:"#ccc",wordBreak:"break-all",fontSize:".82rem",
-                             lineHeight:1.6,textAlign:"center"}}>{result}</div>
+                <div style={{color:"var(--gn)",fontWeight:800,fontSize:"1rem",letterSpacing:".04em"}}>QR DETECTED!</div>
+                <div style={{color:"#ccc",wordBreak:"break-all",fontSize:".82rem",lineHeight:1.6,textAlign:"center"}}>{result}</div>
+              </div>
+            )}
+
+            {/* Error state */}
+            {phase === "error" && (
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:290,gap:10,padding:20}}>
+                <div style={{fontSize:"2.5rem"}}>⚠️</div>
+                <p style={{color:"#ef4444",fontSize:".88rem",textAlign:"center"}}>{err}</p>
               </div>
             )}
           </div>
 
-          {/* error */}
-          {err && (
-            <div style={{background:"rgba(239,68,68,.09)",border:"1px solid rgba(239,68,68,.27)",
-                         borderRadius:10,padding:"11px 13px",color:"#ef4444",marginBottom:12,
-                         fontSize:".83rem",lineHeight:1.5,textAlign:"left"}}>⚠️ {err}</div>
+          {/* Error below viewport (for file scan errors) */}
+          {err && phase !== "error" && (
+            <div style={{background:"rgba(239,68,68,.09)",border:"1px solid rgba(239,68,68,.27)",borderRadius:10,padding:"11px 13px",color:"#ef4444",marginBottom:12,fontSize:".83rem",lineHeight:1.5,textAlign:"left"}}>⚠️ {err}</div>
           )}
 
-          {/* actions */}
+          {/* Actions */}
           {hasResult ? (
             <div style={{display:"grid",gap:8}}>
-              <div className="card" style={{borderRadius:10,padding:"12px 14px",
-                                           wordBreak:"break-all",textAlign:"left",
-                                           fontSize:".84rem",lineHeight:1.55}}>
-                <p style={{color:"#7878a0",fontSize:".68rem",marginBottom:4,
-                           textTransform:"uppercase",letterSpacing:".06em"}}>Decoded</p>
+              <div className="card" style={{borderRadius:10,padding:"12px 14px",wordBreak:"break-all",textAlign:"left",fontSize:".84rem",lineHeight:1.55}}>
+                <p style={{color:"#7878a0",fontSize:".68rem",marginBottom:4,textTransform:"uppercase",letterSpacing:".06em"}}>Decoded content</p>
                 {result}
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
                 {result.startsWith("http") && (
-                  <button className="gbtn" style={{borderRadius:10,padding:10,fontSize:".85rem"}}
-                    onClick={()=>window.open(result,"_blank")}>🔗 Open Link</button>
+                  <button className="gbtn" style={{borderRadius:10,padding:10,fontSize:".85rem"}} onClick={()=>window.open(result,"_blank")}>🔗 Open Link</button>
                 )}
-                <button className="ghost"
-                  style={{borderRadius:10,padding:10,fontSize:".85rem",
-                          gridColumn:result.startsWith("http")?"auto":"1/-1"}}
-                  onClick={()=>{navigator.clipboard.writeText(result);
-                    setCopied(true);setTimeout(()=>setCopied(false),2000);}}>
-                  {copied?"✓ Copied!":"📋 Copy"}
-                </button>
-                <button className="ghost"
-                  style={{borderRadius:10,padding:10,fontSize:".85rem",gridColumn:"1/-1"}}
-                  onClick={reset}>🔄 Scan Again</button>
+                <button className="ghost" style={{borderRadius:10,padding:10,fontSize:".85rem",gridColumn:result.startsWith("http")?"auto":"1/-1"}} onClick={()=>{navigator.clipboard.writeText(result);setCopied(true);setTimeout(()=>setCopied(false),2000);}}>{copied?"✓ Copied!":"📋 Copy"}</button>
+                <button className="ghost" style={{borderRadius:10,padding:10,fontSize:".85rem",gridColumn:"1/-1"}} onClick={reset}>🔄 Scan Again</button>
               </div>
             </div>
           ) : (
             <div style={{display:"grid",gap:8}}>
               <button
-                className={isScanning?"ghost":"gbtn"}
-                style={{width:"100%",borderRadius:12,padding:"13px",fontSize:".96rem",
-                        display:"flex",alignItems:"center",justifyContent:"center",gap:8}}
-                onClick={isScanning ? stopScan : startScan}
-                disabled={isLoading}>
-                {isLoading ? <><div className="spin"/>Starting…</>
-                 : isScanning ? "⏹ Stop Camera"
-                 : "▶ Start Camera Scan"}
+                className={isScanning ? "ghost" : "gbtn"}
+                style={{width:"100%",borderRadius:12,padding:"13px",fontSize:".96rem",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}
+                onClick={isScanning ? () => { stopScan(); setPhase("idle"); } : startScan}
+                disabled={isLoading}
+              >
+                {isLoading ? <><div className="spin"/>Starting…</> : isScanning ? "⏹ Stop Camera" : "▶ Start Camera Scan"}
               </button>
-
               <div style={{display:"flex",alignItems:"center",gap:10,margin:"2px 0"}}>
                 <div style={{flex:1,height:1,background:"var(--br)"}}/>
                 <span style={{color:"var(--mu)",fontSize:".73rem",fontWeight:600}}>OR</span>
                 <div style={{flex:1,height:1,background:"var(--br)"}}/>
               </div>
-
-              <button className="ghost"
-                style={{width:"100%",borderRadius:12,padding:"12px",fontSize:".9rem",
-                        display:"flex",alignItems:"center",justifyContent:"center",gap:8}}
-                onClick={()=>fileRef.current?.click()}>
+              <button className="ghost" style={{width:"100%",borderRadius:12,padding:"12px",fontSize:".9rem",display:"flex",alignItems:"center",justifyContent:"center",gap:8}} onClick={()=>fileRef.current?.click()}>
                 🖼️ Upload Image to Scan
               </button>
-              <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}}
-                onChange={e=>{scanFile(e.target.files[0]);e.target.value="";}}/>
-
-              <p style={{color:"var(--mu)",fontSize:".73rem",textAlign:"center"}}>
-                Works on mobile & desktop · PNG / JPG / WebP
-              </p>
+              <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}} onChange={e=>{scanFile(e.target.files[0]);e.target.value="";}}/>
+              <p style={{color:"var(--mu)",fontSize:".73rem",textAlign:"center"}}>Works on mobile & desktop · PNG / JPG / WebP</p>
             </div>
           )}
         </div>
       </div>
+      {/* Hidden canvas for decoding */}
+      <canvas ref={canvasRef} style={{display:"none"}}/>
     </div>
   );
 };
@@ -1261,7 +873,7 @@ const History = ({nav}) => {
                   <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
                     {item.dataURL&&<div style={{flexShrink:0,background:"#fff",borderRadius:8,padding:4,boxShadow:"0 2px 10px rgba(0,0,0,.16)"}}><img src={item.dataURL} alt="qr" style={{width:58,height:58,display:"block",borderRadius:4}}/></div>}
                     <div style={{flex:1,minWidth:0}}>
-                      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:4}}><span className="hist-badge">{item.type}</span>{item.hasBgImage&&<span style={{fontSize:".68rem"}} title="Has background image">🌄</span>}</div>
+                      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:4}}><span className="hist-badge">{item.type}</span>{item.hasBgImage&&<span style={{fontSize:".68rem"}}>🌄</span>}</div>
                       <div style={{fontSize:".8rem",fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:2}}>{item.content}</div>
                       <div className="mu" style={{fontSize:".7rem"}}>{item.date}</div>
                     </div>
@@ -1283,229 +895,6 @@ const History = ({nav}) => {
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  ABOUT US PAGE
-// ═══════════════════════════════════════════════════════════════
-const About = ({nav}) => {
-  const feats=[
-    {ic:"⚡",t:"Lightning Fast",d:"Generate scannable QR codes in under a second using our optimized Reed-Solomon encoder with H-level error correction."},
-    {ic:"🎨",t:"Fully Branded",d:"Customize every pixel — choose shapes (square, rounded, dots), colors, frames, add background images and your own logo."},
-    {ic:"🌄",t:"Background Images",d:"The first QR platform to let you blend any photo or image directly into the QR canvas with adjustable opacity."},
-    {ic:"📋",t:"Session History",d:"Every QR you generate in a session is stored in-memory with thumbnail previews, ready to re-download or copy."},
-    {ic:"📷",t:"Built-in Scanner",d:"Scan any QR code directly from your camera. Instant decoding, no app install needed — works on any modern browser."},
-    {ic:"🔒",t:"Privacy First",d:"Nothing is sent to any server. All QR generation and scanning happens entirely in your browser. Zero data collection."},
-  ];
-  return(
-    <div style={{minHeight:"100vh",paddingTop:80,paddingBottom:56,position:"relative",zIndex:1}}>
-      <section style={{padding:"60px 24px 48px",textAlign:"center",background:"radial-gradient(ellipse at 50% 0%,rgba(245,166,35,.1) 0%,transparent 60%)"}}>
-        <div style={{maxWidth:720,margin:"0 auto"}}>
-          <div className="badge" style={{display:"inline-flex",marginBottom:14}}>✦ About QR LAB AI</div>
-          <h1 style={{fontSize:"clamp(2.2rem,5vw,3.8rem)",fontWeight:800,marginBottom:16}}>The <span className="gtext">Smarter Way</span><br/>to Create QR Codes</h1>
-          <p className="mu" style={{fontSize:"1.05rem",lineHeight:1.75,maxWidth:560,margin:"0 auto 28px"}}>QR LAB AI is a fully browser-based, zero-server QR code platform built for designers, marketers, and businesses who need beautiful, brand-ready QR codes — instantly, privately, and for free.</p>
-          <div style={{display:"flex",gap:10,justifyContent:"center",flexWrap:"wrap"}}>
-            <button className="gbtn" style={{borderRadius:12,padding:"12px 28px",fontSize:".95rem"}} onClick={()=>nav("generate")}>⚡ Try Generator</button>
-            <button className="ghost" style={{borderRadius:12,padding:"12px 22px",fontSize:".95rem"}} onClick={()=>nav("scan")}>📷 Try Scanner</button>
-          </div>
-        </div>
-      </section>
-      <section style={{padding:"52px 24px",maxWidth:860,margin:"0 auto"}}>
-        <div className="card" style={{borderRadius:22,padding:"36px 32px",border:"1px solid rgba(245,166,35,.15)",background:"rgba(245,166,35,.04)"}}>
-          <div style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
-            <div style={{fontSize:"2.8rem",flexShrink:0}}>🚀</div>
-            <div>
-              <h2 style={{fontWeight:800,fontSize:"1.6rem",marginBottom:11}}>Our Mission</h2>
-              <p style={{color:"var(--mu)",lineHeight:1.78,fontSize:".97rem",marginBottom:12}}>QR codes connect the physical world to the digital one. Yet most QR tools are clunky, server-dependent, or strip away branding. We built QR LAB AI to flip that — a tool that gives you full creative control, respects your privacy, and works entirely in your browser without any sign-up or data collection.</p>
-              <p style={{color:"var(--mu)",lineHeight:1.78,fontSize:".97rem"}}>Whether you're a restaurant owner updating your menu, a marketer running a campaign, a designer building a brand kit, or just someone who needs a quick QR — QR LAB AI has you covered in seconds.</p>
-            </div>
-          </div>
-        </div>
-      </section>
-      <section style={{padding:"0 24px 52px",maxWidth:1060,margin:"0 auto"}}>
-        <div style={{textAlign:"center",marginBottom:40}}>
-          <div className="badge" style={{display:"inline-flex",marginBottom:12}}>✦ Platform Features</div>
-          <h2 style={{fontSize:"clamp(1.7rem,4vw,2.5rem)",fontWeight:800}}>Everything You <span className="gtext">Need</span></h2>
-        </div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:14}}>
-          {feats.map((f,i)=>(
-            <div key={f.t} className="card step-card" style={{borderRadius:18,padding:"24px 20px",animation:`sup .5s ease ${i*.08}s forwards`,opacity:0}}>
-              <div style={{fontSize:"2rem",marginBottom:12}}>{f.ic}</div>
-              <h3 style={{fontWeight:700,fontSize:"1rem",marginBottom:9}}>{f.t}</h3>
-              <p className="mu" style={{fontSize:".87rem",lineHeight:1.68,flex:1}}>{f.d}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-      <section style={{padding:"0 24px 52px",maxWidth:860,margin:"0 auto"}}>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14}}>
-          {[["100%","Browser-based"],["0","Data Collected"],["∞","Free Forever"]].map(([n,l])=>(
-            <div key={l} className="card" style={{borderRadius:18,padding:"28px 16px",textAlign:"center",border:"1px solid rgba(245,166,35,.12)"}}>
-              <div style={{fontFamily:"Syne,sans-serif",fontWeight:800,fontSize:"clamp(2rem,5vw,2.8rem)",background:"linear-gradient(135deg,var(--au),#eeeef8 80%)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",backgroundClip:"text",marginBottom:6}}>{n}</div>
-              <div className="mu" style={{fontSize:".85rem",fontWeight:500}}>{l}</div>
-            </div>
-          ))}
-        </div>
-      </section>
-      <section style={{padding:"0 24px 20px",maxWidth:680,margin:"0 auto",textAlign:"center"}}>
-        <h2 style={{fontWeight:800,fontSize:"clamp(1.6rem,4vw,2.4rem)",marginBottom:12}}>Start Creating <span className="gtext">Today</span></h2>
-        <p className="mu" style={{marginBottom:22,fontSize:".95rem",lineHeight:1.6}}>No account. No server. No cost. Just open the generator and create your first QR code in under 10 seconds.</p>
-        <button className="gbtn" style={{borderRadius:13,padding:"13px 36px",fontSize:"1rem"}} onClick={()=>nav("generate")}>⚡ Generate My First QR</button>
-      </section>
-    </div>
-  );
-};
-
-// ═══════════════════════════════════════════════════════════════
-//  CONTACT PAGE — Formspree integration → lukhmaan321@gmail.com
-//  Replace YOUR_FORMSPREE_ID below with your actual form ID
-//  from formspree.io (e.g. "xabcd1234")
-// ═══════════════════════════════════════════════════════════════
-const FORMSPREE_ID = "mjgavgpl";
-
-const Contact = () => {
-  const [form,setForm]=useState({name:"",email:"",subject:"",message:""});
-  const [sent,setSent]=useState(false);
-  const [sending,setSending]=useState(false);
-  const [err,setErr]=useState("");
-  const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
-
-  const submit = async () => {
-    if(!form.name||!form.email||!form.message){setErr("Please fill in name, email and message.");return;}
-    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)){setErr("Please enter a valid email address.");return;}
-    setSending(true); setErr("");
-    try {
-      const res = await fetch(`https://formspree.io/f/${FORMSPREE_ID}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify({
-          name: form.name,
-          email: form.email,
-          subject: form.subject || "Contact from QR LAB AI",
-          message: form.message,
-          _replyto: form.email,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setSent(true);
-      } else {
-        setErr(data?.errors?.[0]?.message || "Something went wrong. Please try again.");
-      }
-    } catch(e) {
-      setErr("Network error. Please check your connection and try again.");
-    }
-    setSending(false);
-  };
-
-  return(
-    <div style={{minHeight:"100vh",paddingTop:80,paddingBottom:56,position:"relative",zIndex:1}}>
-      <div className="page-wrap" style={{maxWidth:680,margin:"0 auto",padding:"0 20px"}}>
-        <div style={{textAlign:"center",marginBottom:34}}>
-          <div className="badge" style={{display:"inline-flex",marginBottom:12}}>✉️ Contact Us</div>
-          <h1 style={{fontSize:"clamp(1.9rem,5vw,2.8rem)",fontWeight:800,marginBottom:10}}>Get in <span className="gtext">Touch</span></h1>
-          <p className="mu" style={{fontSize:".95rem",lineHeight:1.65}}>Have a question, feature request, or just want to say hi? We read every message.</p>
-        </div>
-        {sent
-          ?<div className="card" style={{borderRadius:22,padding:"52px 32px",textAlign:"center"}}>
-            <div style={{fontSize:"3.5rem",marginBottom:14}}>✅</div>
-            <h2 style={{fontWeight:800,marginBottom:10,fontSize:"1.5rem"}}>Message Sent!</h2>
-            <p className="mu" style={{marginBottom:6,lineHeight:1.65}}>Thanks for reaching out, <strong style={{color:"var(--tx)"}}>{form.name}</strong>. We'll get back to you at <strong style={{color:"var(--au)"}}>{form.email}</strong> within 24–48 hours.</p>
-            <button className="gbtn" style={{marginTop:22,borderRadius:12,padding:"11px 28px",fontSize:".93rem"}} onClick={()=>{setSent(false);setForm({name:"",email:"",subject:"",message:""});}}>Send Another</button>
-          </div>
-          :<div className="card" style={{borderRadius:22,padding:"28px 24px",display:"flex",flexDirection:"column",gap:16}}>
-
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:13}}>
-              <div><Lbl t="Your Name *"/><input value={form.name} onChange={e=>upd("name",e.target.value)} placeholder="John Doe"/></div>
-              <div><Lbl t="Email Address *"/><input type="email" value={form.email} onChange={e=>upd("email",e.target.value)} placeholder="you@example.com"/></div>
-            </div>
-            <div><Lbl t="Subject"/><input value={form.subject} onChange={e=>upd("subject",e.target.value)} placeholder="What's this about?"/></div>
-            <div><Lbl t="Message *"/><textarea value={form.message} onChange={e=>upd("message",e.target.value)} placeholder="Tell us what's on your mind…" rows={5} style={{resize:"vertical"}}/></div>
-            {err&&<div style={{background:"rgba(239,68,68,.09)",border:"1px solid rgba(239,68,68,.28)",borderRadius:8,padding:"9px 12px",color:"#ef4444",fontSize:".83rem"}}>⚠️ {err}</div>}
-            <button className="gbtn" style={{borderRadius:12,padding:"13px",fontSize:"1rem",display:"flex",alignItems:"center",justifyContent:"center",gap:8}} onClick={submit} disabled={sending}>
-              {sending?<><div className="spin"/>Sending…</>:"📨 Send Message"}
-            </button>
-            <div style={{display:"flex",gap:8,alignItems:"center",justifyContent:"center",flexWrap:"wrap"}}>
-              {[{ic:"✉️",t:"lukhmaan321@gmail.com"},{ic:"🕐",t:"Response within 24–48h"},{ic:"🔒",t:"We never share your data"}].map(x=>(
-                <div key={x.t} style={{display:"flex",alignItems:"center",gap:4,fontSize:".75rem",color:"var(--mu)"}}><span>{x.ic}</span><span>{x.t}</span></div>
-              ))}
-            </div>
-          </div>
-        }
-      </div>
-    </div>
-  );
-};
-
-// ═══════════════════════════════════════════════════════════════
-//  PRIVACY POLICY
-// ═══════════════════════════════════════════════════════════════
-const Privacy = () => {
-  const sections=[
-    {t:"Information We Collect",b:"QR LAB AI is a fully browser-based application. We do not collect, store, or transmit any personal data to external servers. All QR code generation and scanning happens entirely within your browser. No content you enter, generate, or scan is ever sent to or stored on our servers."},
-    {t:"Cookies & Local Storage",b:"QR LAB AI does not use tracking cookies. We do not use analytics services, advertising networks, or any third-party tracking. Session history is stored only in your browser's in-memory JavaScript state and is cleared when you close or refresh the page."},
-    {t:"Third-Party Services",b:"We load fonts from Google Fonts and the QR library from cdnjs.cloudflare.com for functionality. These are standard CDN services and load static assets only. No user data is passed to these services beyond the standard HTTP request."},
-    {t:"Camera Permissions",b:"The scanner feature requests camera access through your browser's standard permission system. Camera data is processed locally in real-time and is never transmitted anywhere. You can revoke camera permission at any time through your browser settings."},
-    {t:"Your Rights",b:"Since we collect no personal data, there is nothing to delete, export, or correct on our end. If you have concerns about data processed locally in your browser, you can clear your browser's cache and storage at any time."},
-    {t:"Changes to This Policy",b:"We may update this Privacy Policy from time to time. Any changes will be reflected on this page with an updated effective date. We encourage you to review this page periodically."},
-  ];
-  return(
-    <div style={{minHeight:"100vh",paddingTop:80,paddingBottom:56,position:"relative",zIndex:1}}>
-      <div className="page-wrap" style={{maxWidth:760,margin:"0 auto",padding:"0 20px"}}>
-        <div style={{textAlign:"center",marginBottom:36}}>
-          <div className="badge" style={{display:"inline-flex",marginBottom:12}}>🔒 Privacy Policy</div>
-          <h1 style={{fontSize:"clamp(1.9rem,5vw,2.8rem)",fontWeight:800,marginBottom:10}}>Your Privacy <span className="gtext">Matters</span></h1>
-          <p className="mu" style={{fontSize:".93rem"}}>Effective Date: January 1, 2026 · Last updated: March 2026</p>
-        </div>
-        <div className="card" style={{borderRadius:20,padding:"28px 24px",marginBottom:16,border:"1px solid rgba(245,166,35,.14)",background:"rgba(245,166,35,.04)"}}>
-          <div style={{display:"flex",gap:12,alignItems:"flex-start"}}><span style={{fontSize:"1.6rem",flexShrink:0}}>🛡️</span><div><h3 style={{fontWeight:700,marginBottom:6,fontSize:"1rem"}}>The Short Version</h3><p style={{color:"var(--mu)",fontSize:".9rem",lineHeight:1.7}}>We collect <strong style={{color:"var(--au)"}}>absolutely nothing</strong>. No sign-ups. No cookies. No analytics. Everything you do on QR LAB AI stays in your browser. Period.</p></div></div>
-        </div>
-        <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          {sections.map((sec,i)=>(
-            <div key={sec.t} className="card" style={{borderRadius:16,padding:"22px 20px",animation:`sup .45s ease ${i*.06}s forwards`,opacity:0}}>
-              <h3 style={{fontWeight:700,marginBottom:9,fontSize:".97rem",display:"flex",alignItems:"center",gap:8}}><span style={{color:"var(--au)",fontSize:".8rem",fontFamily:"Syne,sans-serif",fontWeight:800,minWidth:22}}>{i+1}.</span>{sec.t}</h3>
-              <p style={{color:"var(--mu)",fontSize:".88rem",lineHeight:1.72}}>{sec.b}</p>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ═══════════════════════════════════════════════════════════════
-//  TERMS OF SERVICE
-// ═══════════════════════════════════════════════════════════════
-const Terms = () => {
-  const sections=[
-    {t:"Acceptance of Terms",b:"By accessing or using QR LAB AI, you agree to be bound by these Terms of Service. If you do not agree to these terms, please do not use our service. These terms apply to all visitors and users of the application."},
-    {t:"Description of Service",b:"QR LAB AI is a free, browser-based QR code generation and scanning tool. The service allows you to create customized QR codes and decode existing QR codes using your device's camera. No account creation or personal information is required to use the service."},
-    {t:"Permitted Use",b:"You may use QR LAB AI for any lawful purpose, including personal, commercial, and educational use. You may generate QR codes pointing to any legal content. You are solely responsible for the content encoded in QR codes you create and for ensuring your use complies with applicable laws."},
-    {t:"Prohibited Use",b:"You may not use QR LAB AI to generate QR codes that link to malware, phishing sites, illegal content, or content that violates the rights of others. You may not attempt to reverse engineer, decompile, or disrupt the service. Automated bulk generation in ways that burden our infrastructure is prohibited."},
-    {t:"Intellectual Property",b:"The QR LAB AI brand, logo, and application design are our intellectual property. QR codes you generate belong to you. We claim no ownership over content you create using our tool. The underlying QR specification is an open ISO standard (ISO/IEC 18004)."},
-    {t:"Disclaimer of Warranties",b:"QR LAB AI is provided 'as is' without warranties of any kind. We do not guarantee that generated QR codes will be scannable by all readers, or that the service will be uninterrupted. Use the service at your own discretion and always test QR codes before deployment."},
-    {t:"Limitation of Liability",b:"To the maximum extent permitted by law, QR LAB AI and its operators shall not be liable for any indirect, incidental, or consequential damages arising from your use of the service, including but not limited to loss of business, revenue, or data."},
-    {t:"Changes to Terms",b:"We reserve the right to modify these terms at any time. Continued use of the service after changes constitutes acceptance of the updated terms. We encourage you to review these terms periodically."},
-  ];
-  return(
-    <div style={{minHeight:"100vh",paddingTop:80,paddingBottom:56,position:"relative",zIndex:1}}>
-      <div className="page-wrap" style={{maxWidth:760,margin:"0 auto",padding:"0 20px"}}>
-        <div style={{textAlign:"center",marginBottom:36}}>
-          <div className="badge" style={{display:"inline-flex",marginBottom:12}}>📄 Terms of Service</div>
-          <h1 style={{fontSize:"clamp(1.9rem,5vw,2.8rem)",fontWeight:800,marginBottom:10}}>Terms of <span className="gtext">Service</span></h1>
-          <p className="mu" style={{fontSize:".93rem"}}>Effective Date: January 1, 2026 · Last updated: March 2026</p>
-        </div>
-        <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          {sections.map((sec,i)=>(
-            <div key={sec.t} className="card" style={{borderRadius:16,padding:"22px 20px",animation:`sup .45s ease ${i*.05}s forwards`,opacity:0}}>
-              <h3 style={{fontWeight:700,marginBottom:9,fontSize:".97rem",display:"flex",alignItems:"center",gap:8}}><span style={{color:"var(--au)",fontSize:".8rem",fontFamily:"Syne,sans-serif",fontWeight:800,minWidth:22}}>{i+1}.</span>{sec.t}</h3>
-              <p style={{color:"var(--mu)",fontSize:".88rem",lineHeight:1.72}}>{sec.b}</p>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ═══════════════════════════════════════════════════════════════
 //  FOOTER
 // ═══════════════════════════════════════════════════════════════
 const Footer = ({nav}) => {
@@ -1520,20 +909,15 @@ const Footer = ({nav}) => {
         <div className="foot-grid" style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr",gap:40,marginBottom:44}}>
           <div className="foot-brand foot-col" style={delay(0)}>
             <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:14,cursor:"pointer"}} onClick={()=>nav("home")}>
-              <div style={{width:34,height:34,borderRadius:9,background:"linear-gradient(135deg,var(--au),var(--ad))",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 0 18px var(--ag)",fontFamily:"Syne,sans-serif",fontWeight:800,fontSize:".9rem",color:"#080808",flexShrink:0}}>Q</div>
+              <div style={{width:34,height:34,borderRadius:9,background:"linear-gradient(135deg,var(--au),var(--ad))",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"Syne,sans-serif",fontWeight:800,fontSize:".9rem",color:"#080808",flexShrink:0}}>Q</div>
               <span style={{fontFamily:"Syne,sans-serif",fontWeight:800,fontSize:"1.18rem",background:"linear-gradient(135deg,var(--au),#eeeef8 80%)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",backgroundClip:"text"}}>QR LAB AI</span>
             </div>
             <p style={{color:"#7878a0",fontSize:"1rem",lineHeight:1.75,maxWidth:255,marginBottom:18}}>Create • Scan • Share QR Codes. The AI-powered QR platform for modern businesses and creators worldwide.</p>
-            <div style={{display:"flex",gap:8,marginBottom:20}}>
-              {socials.map(({ic,l})=><button key={l} className="social-btn" title={l}>{ic}</button>)}
-            </div>
-            <div style={{display:"flex",gap:3,opacity:.16}}>
-              {[1,0,1,1,0,1,0,1,1,0,1,1,0,1].map((v,i)=><div key={i} style={{width:7,height:7,borderRadius:2,background:v?"var(--au)":"transparent",border:v?"none":"1px solid rgba(245,166,35,.3)"}}/>)}
-            </div>
+            <div style={{display:"flex",gap:8}}>{socials.map(({ic,l})=><button key={l} className="social-btn" title={l}>{ic}</button>)}</div>
           </div>
           <div className="foot-col" style={delay(.1)}>
             <p className="foot-head">Product</p>
-            {[["⚡ Generate QR","generate"],["📷 Scan QR","scan"],["📋 History","history"],["ℹ️ About Us","about"]].map(([lbl,pg])=>(
+            {[["⚡ Generate QR","generate"],["📷 Scan QR","scan"],["📋 History","history"],["ℹ️ About","about"]].map(([lbl,pg])=>(
               <span key={lbl} className="foot-link" onClick={()=>nav(pg)}>{lbl}</span>
             ))}
           </div>
@@ -1575,26 +959,18 @@ export default function App() {
   const [dark, setDark] = useState(true);
   const [top, setTop] = useState(false);
 
-  // ── Persist history to localStorage — survives refreshes ──
   const [history, setHistory] = useState(() => {
-    try {
-      const saved = localStorage.getItem("qrlab_history");
-      return saved ? JSON.parse(saved) : [];
-    } catch(_) { return []; }
+    try { const s = localStorage.getItem("qrlab_history"); return s ? JSON.parse(s) : []; }
+    catch(_) { return []; }
   });
 
-  // Sync history to localStorage whenever it changes
   useEffect(() => {
-    try { localStorage.setItem("qrlab_history", JSON.stringify(history)); }
-    catch(_) {}
+    try { localStorage.setItem("qrlab_history", JSON.stringify(history)); } catch(_) {}
   }, [history]);
 
   const addToHistory = useCallback((item) => setHistory(prev => [item,...prev].slice(0,100)),[]);
   const removeFromHistory = useCallback((id) => setHistory(prev => prev.filter(h=>h.id!==id)),[]);
-  const clearHistory = useCallback(() => {
-    setHistory([]);
-    try { localStorage.removeItem("qrlab_history"); } catch(_) {}
-  },[]);
+  const clearHistory = useCallback(() => { setHistory([]); try { localStorage.removeItem("qrlab_history"); } catch(_) {} },[]);
 
   useEffect(()=>{injectStyles();},[]);
   useEffect(()=>{document.body.classList.toggle("lm",!dark);},[dark]);
@@ -1611,10 +987,6 @@ export default function App() {
           {page==="generate" && <Generate/>}
           {page==="scan"     && <Scan/>}
           {page==="history"  && <History nav={setPage}/>}
-          {page==="about"    && <About nav={setPage}/>}
-          {page==="contact"  && <Contact/>}
-          {page==="privacy"  && <Privacy/>}
-          {page==="terms"    && <Terms/>}
         </main>
         <Footer nav={setPage}/>
         <StickyFABs nav={setPage}/>
