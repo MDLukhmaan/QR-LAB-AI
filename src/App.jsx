@@ -1,68 +1,115 @@
 import React, { useState, useEffect, useRef, useCallback, createContext, useContext } from "react";
-import "./styles.css";
 const HistoryContext = createContext(null);
 const useHistory = () => useContext(HistoryContext);
 
 // ═══════════════════════════════════════════════════════════════
-//  QR GENERATOR
+//  QR GENERATOR — FIXED: uses qrcode-generator for raw matrix
+//  instead of pixel-reading from a hidden DOM canvas (race condition)
 // ═══════════════════════════════════════════════════════════════
-function loadQRLib() {
-  return new Promise((resolve) => {
-    if (window.QRCode) { resolve(); return; }
+function loadQRGen() {
+  return new Promise((resolve, reject) => {
+    if (window.qrcode) { resolve(); return; }
     const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js";
-    s.onload = resolve; s.onerror = resolve;
+    s.src = "https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js";
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("QR lib load failed"));
     document.head.appendChild(s);
   });
 }
 
 async function generateQR(text, opts = {}) {
-  await loadQRLib();
   const { fg = "#000000", bg = "#ffffff", size = 300, shape = "square", logo = null, bgImage = null, bgOpacity = 0.35 } = opts;
-  return new Promise((resolve, reject) => {
-    try {
-      const container = document.createElement("div");
-      container.style.cssText = "position:fixed;top:-9999px;left:-9999px;width:0;height:0;overflow:hidden;";
-      document.body.appendChild(container);
-      new window.QRCode(container, { text: text || "https://qrlab.ai", width: size, height: size, colorDark: fg, colorLight: "rgba(0,0,0,0)", correctLevel: window.QRCode.CorrectLevel.H });
-      setTimeout(() => {
-        const srcEl = container.querySelector("canvas") || container.querySelector("img");
-        if (!srcEl) { document.body.removeChild(container); reject(new Error("QR gen failed")); return; }
-        const cv = document.createElement("canvas"); cv.width = size; cv.height = size;
-        const ctx = cv.getContext("2d");
-        const renderFinal = (qrImg) => {
-          ctx.fillStyle = bg; ctx.fillRect(0, 0, size, size);
-          const applyBg = (cb) => {
-            if (!bgImage) { cb(); return; }
-            const bgi = new Image();
-            bgi.onload = () => {
-              const imgAR = bgi.width / bgi.height;
-              let sx = 0, sy = 0, sw = bgi.width, sh = bgi.height;
-              if (imgAR > 1) { sw = bgi.height; sx = (bgi.width - sw) / 2; } else { sh = bgi.width; sy = (bgi.height - sh) / 2; }
-              ctx.globalAlpha = bgOpacity; ctx.drawImage(bgi, sx, sy, sw, sh, 0, 0, size, size); ctx.globalAlpha = 1; cb();
-            };
-            bgi.onerror = cb; bgi.src = bgImage;
-          };
-          applyBg(() => {
-            const tmp = document.createElement("canvas"); tmp.width = size; tmp.height = size;
-            const tctx = tmp.getContext("2d"); tctx.drawImage(qrImg, 0, 0, size, size);
-            const data = tctx.getImageData(0, 0, size, size); const px = Math.ceil(size / 37);
-            ctx.fillStyle = fg;
-            for (let row = 0; row < size; row += px) for (let col = 0; col < size; col += px) {
-              const i = (row * size + col) * 4; if (!(data.data[i] < 128 && data.data[i+3] > 64)) continue;
-              if (shape === "dots") { ctx.beginPath(); ctx.arc(col+px/2, row+px/2, px*.44, 0, Math.PI*2); ctx.fill(); }
-              else if (shape === "rounded") { const r=px*.3; ctx.beginPath(); ctx.moveTo(col+r,row); ctx.arcTo(col+px,row,col+px,row+px,r); ctx.arcTo(col+px,row+px,col,row+px,r); ctx.arcTo(col,row+px,col,row,r); ctx.arcTo(col,row,col+px,row,r); ctx.fill(); }
-              else ctx.fillRect(col, row, px, px);
-            }
-            const finish = () => { document.body.removeChild(container); resolve(cv.toDataURL("image/png")); };
-            if (logo) { const li = new Image(); li.onload = () => { const ls=size*.2,lx=(size-ls)/2,ly=(size-ls)/2; ctx.fillStyle=bg; ctx.fillRect(lx-5,ly-5,ls+10,ls+10); ctx.save(); ctx.beginPath(); ctx.roundRect(lx,ly,ls,ls,6); ctx.clip(); ctx.drawImage(li,lx,ly,ls,ls); ctx.restore(); finish(); }; li.onerror=finish; li.src=logo; } else finish();
-          });
-        };
-        if (srcEl.tagName === "CANVAS") renderFinal(srcEl);
-        else { const qi = new Image(); qi.onload = () => renderFinal(qi); qi.onerror = () => { document.body.removeChild(container); reject(new Error("img fail")); }; qi.src = srcEl.src; }
-      }, 260);
-    } catch(e) { reject(e); }
-  });
+
+  await loadQRGen();
+
+  // qrcode-generator gives us a raw boolean matrix — no DOM tricks needed
+  const qr = window.qrcode(0, "H");
+  qr.addData(text || "https://qrlab.ai");
+  qr.make();
+
+  const moduleCount = qr.getModuleCount();
+  const cv = document.createElement("canvas");
+  cv.width = size; cv.height = size;
+  const ctx = cv.getContext("2d");
+
+  // Background fill
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, size, size);
+
+  // Optional background image
+  if (bgImage) {
+    await new Promise((res) => {
+      const img = new Image();
+      img.onload = () => {
+        const ar = img.width / img.height;
+        let sx = 0, sy = 0, sw = img.width, sh = img.height;
+        if (ar > 1) { sw = img.height; sx = (img.width - sw) / 2; }
+        else { sh = img.width; sy = (img.height - sh) / 2; }
+        ctx.globalAlpha = bgOpacity;
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, size, size);
+        ctx.globalAlpha = 1;
+        res();
+      };
+      img.onerror = res;
+      img.src = bgImage;
+    });
+  }
+
+  // Draw QR modules directly from matrix — no pixel guessing
+  const padding = Math.floor(size * 0.04);
+  const drawSize = size - padding * 2;
+  const cellSize = drawSize / moduleCount;
+  ctx.fillStyle = fg;
+
+  for (let row = 0; row < moduleCount; row++) {
+    for (let col = 0; col < moduleCount; col++) {
+      if (!qr.isDark(row, col)) continue;
+      const x = padding + col * cellSize;
+      const y = padding + row * cellSize;
+      const w = cellSize, h = cellSize;
+      if (shape === "dots") {
+        ctx.beginPath();
+        ctx.arc(x + w / 2, y + h / 2, w * 0.45, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (shape === "rounded") {
+        const r = w * 0.28;
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+        ctx.fill();
+      } else {
+        ctx.fillRect(x, y, w, h);
+      }
+    }
+  }
+
+  // Optional logo overlay
+  if (logo) {
+    await new Promise((res) => {
+      const img = new Image();
+      img.onload = () => {
+        const ls = size * 0.2, lx = (size - ls) / 2, ly = (size - ls) / 2;
+        ctx.fillStyle = bg;
+        ctx.fillRect(lx - 4, ly - 4, ls + 8, ls + 8);
+        ctx.save();
+        ctx.beginPath();
+        const r6=6,x0=lx,y0=ly,w0=ls,h0=ls;
+        ctx.moveTo(x0+r6,y0);ctx.arcTo(x0+w0,y0,x0+w0,y0+h0,r6);ctx.arcTo(x0+w0,y0+h0,x0,y0+h0,r6);ctx.arcTo(x0,y0+h0,x0,y0,r6);ctx.arcTo(x0,y0,x0+w0,y0,r6);ctx.closePath();
+        ctx.clip();
+        ctx.drawImage(img, lx, ly, ls, ls);
+        ctx.restore();
+        res();
+      };
+      img.onerror = res;
+      img.src = logo;
+    });
+  }
+
+  return cv.toDataURL("image/png");
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -93,7 +140,6 @@ const injectStyles = () => {
     .h-logo{display:flex;align-items:center;gap:9px;cursor:pointer;flex-shrink:0}
     .h-logo-icon{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,var(--au),var(--ad));display:flex;align-items:center;justify-content:center;box-shadow:0 0 16px var(--ag);font-family:'Syne',sans-serif;font-weight:800;font-size:.9rem;color:#080808!important;flex-shrink:0}
     .h-logo-txt{font-family:'Syne',sans-serif;font-weight:800;font-size:1.2rem;background:linear-gradient(135deg,var(--au),#eeeef8 80%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-    /* Nav now sits on the RIGHT inside h-actions */
     .h-nav{display:flex;gap:2px;align-items:center}
     .h-nl{color:#7878a0!important;font-weight:600;font-size:.9rem;cursor:pointer;padding:6px 12px;border-radius:8px;transition:all .22s;white-space:nowrap;background:transparent;border:none;font-family:'Syne',sans-serif;letter-spacing:.01em}
     .h-nl:hover,.h-nl.on{color:var(--au)!important;background:rgba(245,166,35,.1)!important}
@@ -126,14 +172,8 @@ const injectStyles = () => {
     .fab:hover{transform:translateY(-3px) scale(1.08)}
     .fab-gen{background:linear-gradient(135deg,var(--au),var(--ad));box-shadow:0 4px 20px var(--ag)}
     .fab-gen:hover{box-shadow:0 6px 28px var(--ag)}
-    .fab-scan{
-  background: linear-gradient(135deg, #f5a623, #c8821a);
-  box-shadow: 0 4px 20px rgba(245,166,35,0.40);
-}
-
-.fab-scan:hover{
-  box-shadow: 0 6px 28px rgba(200,130,26,0.5);
-}
+    .fab-scan{background:linear-gradient(135deg,#f5a623,#c8821a);box-shadow:0 4px 20px rgba(245,166,35,0.40)}
+    .fab-scan:hover{box-shadow:0 6px 28px rgba(200,130,26,0.5)}
     .fab-tip{position:absolute;left:58px;background:#09090e;border:1px solid rgba(255,255,255,.12);color:#eeeef8;font-size:.75rem;font-weight:600;padding:4px 10px;border-radius:7px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .2s;font-family:'DM Sans',sans-serif}
     .fab:hover .fab-tip{opacity:1}
 
@@ -222,7 +262,7 @@ const injectStyles = () => {
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  PARTICLES — rich background: dots, squares, lines, mouse glow
+//  PARTICLES
 // ═══════════════════════════════════════════════════════════════
 const Particles = () => {
   const r = useRef(null);
@@ -230,427 +270,138 @@ const Particles = () => {
     const cv = r.current; if (!cv) return;
     const ctx = cv.getContext("2d");
     const mouse = { x: -9999, y: -9999 };
-
-    const resize = () => {
-      cv.width = innerWidth;
-      cv.height = innerHeight;
-    };
+    const resize = () => { cv.width = innerWidth; cv.height = innerHeight; };
     resize();
-
-    // Create rich particle set: dots, squares, QR-style mini-squares, crosses
     const COUNT = 110;
     const mkP = () => ({
-      x: Math.random() * innerWidth,
-      y: Math.random() * innerHeight,
-      s: Math.random() * 3 + 0.6,
-      vx: (Math.random() - 0.5) * 0.38,
-      vy: (Math.random() - 0.5) * 0.38,
+      x: Math.random() * innerWidth, y: Math.random() * innerHeight,
+      s: Math.random() * 3 + 0.6, vx: (Math.random() - 0.5) * 0.38, vy: (Math.random() - 0.5) * 0.38,
       o: Math.random() * 0.18 + 0.04,
       type: ["dot","sq","sq","cross","sq"][Math.floor(Math.random()*5)],
-      pulse: Math.random() * Math.PI * 2, // phase offset for pulsing
+      pulse: Math.random() * Math.PI * 2,
     });
     const P = Array.from({ length: COUNT }, mkP);
-
-    const CONNECT_DIST = 130;
-    const MOUSE_DIST   = 160;
+    const CONNECT_DIST = 130, MOUSE_DIST = 160;
     let id;
-
     const draw = () => {
       ctx.clearRect(0, 0, cv.width, cv.height);
-
-      // ── Draw connection lines between nearby particles ──
-      for (let i = 0; i < P.length; i++) {
-        for (let j = i + 1; j < P.length; j++) {
-          const dx = P[i].x - P[j].x;
-          const dy = P[i].y - P[j].y;
-          const dist = Math.sqrt(dx*dx + dy*dy);
-          if (dist < CONNECT_DIST) {
-            const alpha = (1 - dist / CONNECT_DIST) * 0.09;
-            ctx.save();
-            ctx.globalAlpha = alpha;
-            ctx.strokeStyle = "#f5a623";
-            ctx.lineWidth = 0.7;
-            ctx.beginPath();
-            ctx.moveTo(P[i].x, P[i].y);
-            ctx.lineTo(P[j].x, P[j].y);
-            ctx.stroke();
-            ctx.restore();
-          }
-        }
+      for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) {
+        const dx = P[i].x-P[j].x, dy = P[i].y-P[j].y, dist = Math.sqrt(dx*dx+dy*dy);
+        if (dist < CONNECT_DIST) { ctx.save(); ctx.globalAlpha=(1-dist/CONNECT_DIST)*0.09; ctx.strokeStyle="#f5a623"; ctx.lineWidth=0.7; ctx.beginPath(); ctx.moveTo(P[i].x,P[i].y); ctx.lineTo(P[j].x,P[j].y); ctx.stroke(); ctx.restore(); }
       }
-
-      // ── Mouse repulsion glow lines ──
       for (let i = 0; i < P.length; i++) {
-        const dx = P[i].x - mouse.x;
-        const dy = P[i].y - mouse.y;
-        const dist = Math.sqrt(dx*dx + dy*dy);
-        if (dist < MOUSE_DIST) {
-          const alpha = (1 - dist / MOUSE_DIST) * 0.22;
-          ctx.save();
-          ctx.globalAlpha = alpha;
-          ctx.strokeStyle = "#f5a623";
-          ctx.lineWidth = 0.9;
-          ctx.beginPath();
-          ctx.moveTo(P[i].x, P[i].y);
-          ctx.lineTo(mouse.x, mouse.y);
-          ctx.stroke();
-          ctx.restore();
-          // Nudge particles gently away from mouse
-          P[i].vx += (dx / dist) * 0.012;
-          P[i].vy += (dy / dist) * 0.012;
-        }
+        const dx=P[i].x-mouse.x, dy=P[i].y-mouse.y, dist=Math.sqrt(dx*dx+dy*dy);
+        if (dist < MOUSE_DIST) { ctx.save(); ctx.globalAlpha=(1-dist/MOUSE_DIST)*0.22; ctx.strokeStyle="#f5a623"; ctx.lineWidth=0.9; ctx.beginPath(); ctx.moveTo(P[i].x,P[i].y); ctx.lineTo(mouse.x,mouse.y); ctx.stroke(); ctx.restore(); P[i].vx+=(dx/dist)*0.012; P[i].vy+=(dy/dist)*0.012; }
       }
-
-      // ── Draw each particle ──
       const t = Date.now() / 1000;
       P.forEach(p => {
-        // Soft pulse on opacity
-        const pulsedO = p.o * (0.7 + 0.3 * Math.sin(t * 1.4 + p.pulse));
-        ctx.save();
-        ctx.globalAlpha = pulsedO;
-        ctx.fillStyle = "#f5a623";
-
-        if (p.type === "dot") {
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, p.s, 0, Math.PI * 2);
-          ctx.fill();
-        } else if (p.type === "sq") {
-          const sz = p.s * 2.4;
-          ctx.fillRect(p.x - sz/2, p.y - sz/2, sz, sz);
-        } else if (p.type === "cross") {
-          const arm = p.s * 2.2;
-          ctx.fillRect(p.x - arm/2, p.y - 0.7, arm, 1.4);
-          ctx.fillRect(p.x - 0.7, p.y - arm/2, 1.4, arm);
-        }
-
+        const pulsedO = p.o*(0.7+0.3*Math.sin(t*1.4+p.pulse));
+        ctx.save(); ctx.globalAlpha=pulsedO; ctx.fillStyle="#f5a623";
+        if (p.type==="dot") { ctx.beginPath(); ctx.arc(p.x,p.y,p.s,0,Math.PI*2); ctx.fill(); }
+        else if (p.type==="sq") { const sz=p.s*2.4; ctx.fillRect(p.x-sz/2,p.y-sz/2,sz,sz); }
+        else if (p.type==="cross") { const arm=p.s*2.2; ctx.fillRect(p.x-arm/2,p.y-0.7,arm,1.4); ctx.fillRect(p.x-0.7,p.y-arm/2,1.4,arm); }
         ctx.restore();
-
-        // Speed cap to prevent runaway after mouse interaction
-        const speed = Math.sqrt(p.vx*p.vx + p.vy*p.vy);
-        if (speed > 1.2) { p.vx *= 0.96; p.vy *= 0.96; }
-
-        p.x += p.vx;
-        p.y += p.vy;
-
-        // Wrap around edges
-        if (p.x < -20) p.x = cv.width + 20;
-        if (p.x > cv.width + 20) p.x = -20;
-        if (p.y < -20) p.y = cv.height + 20;
-        if (p.y > cv.height + 20) p.y = -20;
+        const speed=Math.sqrt(p.vx*p.vx+p.vy*p.vy);
+        if (speed>1.2) { p.vx*=0.96; p.vy*=0.96; }
+        p.x+=p.vx; p.y+=p.vy;
+        if (p.x<-20) p.x=cv.width+20; if (p.x>cv.width+20) p.x=-20;
+        if (p.y<-20) p.y=cv.height+20; if (p.y>cv.height+20) p.y=-20;
       });
-
       id = requestAnimationFrame(draw);
     };
-
-    const onMove = e => { mouse.x = e.clientX; mouse.y = e.clientY + scrollY; };
-    const onLeave = () => { mouse.x = -9999; mouse.y = -9999; };
-
+    const onMove = e => { mouse.x=e.clientX; mouse.y=e.clientY+scrollY; };
+    const onLeave = () => { mouse.x=-9999; mouse.y=-9999; };
     draw();
-    addEventListener("resize", resize);
-    addEventListener("mousemove", onMove);
-    addEventListener("mouseleave", onLeave);
-
-    return () => {
-      cancelAnimationFrame(id);
-      removeEventListener("resize", resize);
-      removeEventListener("mousemove", onMove);
-      removeEventListener("mouseleave", onLeave);
-    };
+    addEventListener("resize",resize); addEventListener("mousemove",onMove); addEventListener("mouseleave",onLeave);
+    return () => { cancelAnimationFrame(id); removeEventListener("resize",resize); removeEventListener("mousemove",onMove); removeEventListener("mouseleave",onLeave); };
   }, []);
-
-  return (
-    <canvas
-      ref={r}
-      style={{
-        position: "fixed",
-        top: 0, left: 0,
-        width: "100%", height: "100%",
-        pointerEvents: "none",
-        zIndex: 0,
-      }}
-    />
-  );
+  return <canvas ref={r} style={{position:"fixed",top:0,left:0,width:"100%",height:"100%",pointerEvents:"none",zIndex:0}}/>;
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  HERO QR — cell-by-cell build animation with real QR pattern
+//  HERO QR
 // ═══════════════════════════════════════════════════════════════
-
-// 21×21 QR matrix for https://qrlab.ai (pre-computed, guaranteed to render)
 const QR_MATRIX = [
-  [1,1,1,1,1,1,1,0,1,1,0,0,1,0,1,1,1,1,1,1,1],
-  [1,0,0,0,0,0,1,0,0,1,1,0,0,0,1,0,0,0,0,0,1],
-  [1,0,1,1,1,0,1,0,1,0,1,1,1,0,1,0,1,1,1,0,1],
-  [1,0,1,1,1,0,1,0,0,1,0,1,0,0,1,0,1,1,1,0,1],
-  [1,0,1,1,1,0,1,0,1,1,1,0,1,0,1,0,1,1,1,0,1],
-  [1,0,0,0,0,0,1,0,0,0,1,1,0,0,1,0,0,0,0,0,1],
-  [1,1,1,1,1,1,1,0,1,0,1,0,1,0,1,1,1,1,1,1,1],
-  [0,0,0,0,0,0,0,0,1,1,0,1,1,0,0,0,0,0,0,0,0],
-  [1,1,0,1,1,0,1,1,0,1,1,0,1,1,0,1,1,0,1,1,0],
-  [0,1,1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,1],
-  [1,0,1,1,0,1,1,1,0,1,0,0,1,1,0,1,1,0,1,0,1],
-  [1,1,0,0,1,0,0,0,1,1,1,0,0,1,1,0,0,1,1,0,0],
-  [0,1,1,1,0,1,1,0,0,0,1,0,1,0,0,1,0,1,1,1,0],
-  [0,0,0,0,0,0,0,0,1,1,0,1,0,1,1,0,0,0,1,1,1],
-  [1,1,1,1,1,1,1,0,0,0,1,0,1,0,1,0,1,0,0,0,1],
-  [1,0,0,0,0,0,1,0,1,1,0,1,0,1,1,0,1,1,0,1,0],
-  [1,0,1,1,1,0,1,0,0,0,1,0,1,0,1,1,0,0,1,0,1],
-  [1,0,1,1,1,0,1,0,1,0,0,1,0,1,0,0,1,0,0,1,1],
-  [1,0,1,1,1,0,1,0,0,1,1,0,1,0,1,0,0,1,1,0,0],
-  [1,0,0,0,0,0,1,0,1,0,0,1,0,1,0,1,1,0,0,1,0],
+  [1,1,1,1,1,1,1,0,1,1,0,0,1,0,1,1,1,1,1,1,1],[1,0,0,0,0,0,1,0,0,1,1,0,0,0,1,0,0,0,0,0,1],
+  [1,0,1,1,1,0,1,0,1,0,1,1,1,0,1,0,1,1,1,0,1],[1,0,1,1,1,0,1,0,0,1,0,1,0,0,1,0,1,1,1,0,1],
+  [1,0,1,1,1,0,1,0,1,1,1,0,1,0,1,0,1,1,1,0,1],[1,0,0,0,0,0,1,0,0,0,1,1,0,0,1,0,0,0,0,0,1],
+  [1,1,1,1,1,1,1,0,1,0,1,0,1,0,1,1,1,1,1,1,1],[0,0,0,0,0,0,0,0,1,1,0,1,1,0,0,0,0,0,0,0,0],
+  [1,1,0,1,1,0,1,1,0,1,1,0,1,1,0,1,1,0,1,1,0],[0,1,1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,1],
+  [1,0,1,1,0,1,1,1,0,1,0,0,1,1,0,1,1,0,1,0,1],[1,1,0,0,1,0,0,0,1,1,1,0,0,1,1,0,0,1,1,0,0],
+  [0,1,1,1,0,1,1,0,0,0,1,0,1,0,0,1,0,1,1,1,0],[0,0,0,0,0,0,0,0,1,1,0,1,0,1,1,0,0,0,1,1,1],
+  [1,1,1,1,1,1,1,0,0,0,1,0,1,0,1,0,1,0,0,0,1],[1,0,0,0,0,0,1,0,1,1,0,1,0,1,1,0,1,1,0,1,0],
+  [1,0,1,1,1,0,1,0,0,0,1,0,1,0,1,1,0,0,1,0,1],[1,0,1,1,1,0,1,0,1,0,0,1,0,1,0,0,1,0,0,1,1],
+  [1,0,1,1,1,0,1,0,0,1,1,0,1,0,1,0,0,1,1,0,0],[1,0,0,0,0,0,1,0,1,0,0,1,0,1,0,1,1,0,0,1,0],
   [1,1,1,1,1,1,1,0,0,1,1,0,1,0,1,0,0,1,0,1,1],
 ];
 
 const HeroQR = () => {
-  const GRID = 21;
-  const CELL = 11;
-  const GAP = 1;
-  const TOTAL_SIZE = GRID * (CELL + GAP);
-  const TOTAL_CELLS = GRID * GRID;
-
-  // Flatten matrix into cells immediately — no async, no loading state
-  const allCells = QR_MATRIX.flatMap((row, r) =>
-    row.map((dark, c) => ({
-      id: r * GRID + c,
-      dark: dark === 1,
-      isCorner: (r < 7 && c < 7) || (r < 7 && c >= GRID - 7) || (r >= GRID - 7 && c < 7),
-      r, c,
-    }))
-  );
-
-  // Row-by-row order (top → bottom, left → right)
-  const revealOrder = allCells
-    .slice()
-    .sort((a, b) => a.r !== b.r ? a.r - b.r : a.c - b.c)
-    .map(cell => cell.id);
-
-  const [visibleCount, setVisibleCount] = useState(0);
-  const [phase, setPhase] = useState("building"); // "building" | "complete" | "resetting"
-  const animRef = useRef(null);
-  const countRef = useRef(0); // use ref so closure always reads latest value
-
-  useEffect(() => {
-    const SPEED = 12;
-    const HOLD  = 3000;
-    const BLANK = 400;
-
-    // Clear any leftover timers from previous cycle
+  const GRID=21, CELL=11, GAP=1, TOTAL_SIZE=GRID*(CELL+GAP), TOTAL_CELLS=GRID*GRID;
+  const allCells = QR_MATRIX.flatMap((row,r)=>row.map((dark,c)=>({id:r*GRID+c,dark:dark===1,isCorner:(r<7&&c<7)||(r<7&&c>=GRID-7)||(r>=GRID-7&&c<7),r,c})));
+  const revealOrder = allCells.slice().sort((a,b)=>a.r!==b.r?a.r-b.r:a.c-b.c).map(cell=>cell.id);
+  const [visibleCount,setVisibleCount]=useState(0);
+  const [phase,setPhase]=useState("building");
+  const animRef=useRef(null); const countRef=useRef(0);
+  useEffect(()=>{
+    const SPEED=12,HOLD=3000,BLANK=400;
     clearTimeout(animRef.current);
-
-    if (phase === "building") {
-      countRef.current = 0;
-      setVisibleCount(0);
-
-      const step = () => {
-        countRef.current += 1;
-        setVisibleCount(countRef.current);
-
-        if (countRef.current >= TOTAL_CELLS) {
-          setPhase("complete");
-          return;
-        }
-        animRef.current = setTimeout(step, SPEED);
-      };
-
-      animRef.current = setTimeout(step, SPEED);
-
-    } else if (phase === "complete") {
-      // Hold the complete QR, then reset
-      animRef.current = setTimeout(() => {
-        setPhase("resetting");
-      }, HOLD);
-
-    } else if (phase === "resetting") {
-      setVisibleCount(0);
-      countRef.current = 0;
-      // Brief blank pause then rebuild
-      animRef.current = setTimeout(() => {
-        setPhase("building");
-      }, BLANK);
-    }
-
-    return () => clearTimeout(animRef.current);
-  }, [phase]);
-
-  const visibleSet = new Set(revealOrder.slice(0, visibleCount));
-  const scanRow = phase === "building" && visibleCount < TOTAL_CELLS
-    ? Math.floor(visibleCount / GRID)
-    : -1;
-
-  return (
+    if(phase==="building"){countRef.current=0;setVisibleCount(0);const step=()=>{countRef.current+=1;setVisibleCount(countRef.current);if(countRef.current>=TOTAL_CELLS){setPhase("complete");return;}animRef.current=setTimeout(step,SPEED);};animRef.current=setTimeout(step,SPEED);}
+    else if(phase==="complete"){animRef.current=setTimeout(()=>setPhase("resetting"),HOLD);}
+    else if(phase==="resetting"){setVisibleCount(0);countRef.current=0;animRef.current=setTimeout(()=>setPhase("building"),BLANK);}
+    return()=>clearTimeout(animRef.current);
+  },[phase]);
+  const visibleSet=new Set(revealOrder.slice(0,visibleCount));
+  const scanRow=phase==="building"&&visibleCount<TOTAL_CELLS?Math.floor(visibleCount/GRID):-1;
+  return(
     <div className="flt" style={{display:"inline-block"}}>
-      <div style={{
-        borderRadius: 22,
-        padding: 20,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        background: "rgba(255,255,255,.04)",
-        border: "1px solid rgba(245,166,35,.22)",
-        boxShadow: "0 0 55px rgba(245,166,35,.18), 0 20px 55px rgba(0,0,0,.42)",
-        position: "relative",
-        overflow: "hidden",
-        backdropFilter: "blur(20px)",
-      }}>
-
-        {/* Status badge — centered above grid */}
-        <div style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 6,
-          marginBottom: 10,
-          fontSize: ".72rem",
-          fontWeight: 800,
-          letterSpacing: ".12em",
-          fontFamily: "Syne, sans-serif",
-          color: phase === "complete" ? "#22c55e" : "#f5a623",
-          transition: "color 0.4s",
-          width: "100%",
-          textAlign: "center",
-        }}>
-          <span style={{
-            width: 7, height: 7,
-            borderRadius: "50%",
-            background: phase === "complete" ? "#22c55e" : "#f5a623",
-            display: "inline-block",
-            flexShrink: 0,
-            boxShadow: phase === "complete" ? "0 0 8px #22c55e" : "0 0 8px #f5a623",
-            animation: phase === "building" ? "spinning 1s linear infinite" : "none",
-          }}/>
-          {phase === "complete" ? "READY" : phase === "resetting" ? "···" : "GENERATING…"}
+      <div style={{borderRadius:22,padding:20,display:"flex",flexDirection:"column",alignItems:"center",background:"rgba(255,255,255,.04)",border:"1px solid rgba(245,166,35,.22)",boxShadow:"0 0 55px rgba(245,166,35,.18), 0 20px 55px rgba(0,0,0,.42)",position:"relative",overflow:"hidden",backdropFilter:"blur(20px)"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,marginBottom:10,fontSize:".72rem",fontWeight:800,letterSpacing:".12em",fontFamily:"Syne, sans-serif",color:phase==="complete"?"#22c55e":"#f5a623",transition:"color 0.4s",width:"100%",textAlign:"center"}}>
+          <span style={{width:7,height:7,borderRadius:"50%",background:phase==="complete"?"#22c55e":"#f5a623",display:"inline-block",flexShrink:0,boxShadow:phase==="complete"?"0 0 8px #22c55e":"0 0 8px #f5a623",animation:phase==="building"?"spinning 1s linear infinite":"none"}}/>
+          {phase==="complete"?"READY":phase==="resetting"?"···":"GENERATING…"}
         </div>
-
-        {/* QR Grid with scan line */}
-        <div style={{position:"relative", display:"inline-block"}}>
-          {/* Scan line sweeping down */}
-          {scanRow >= 0 && (
-            <div style={{
-              position: "absolute",
-              left: 0, right: 0,
-              top: scanRow * (CELL + GAP) + CELL / 2 - 1,
-              height: 3,
-              background: "linear-gradient(90deg, transparent, #f5a623cc, #fff, #f5a623cc, transparent)",
-              boxShadow: "0 0 14px #f5a623, 0 0 30px rgba(245,166,35,.55)",
-              borderRadius: 2,
-              zIndex: 10,
-              pointerEvents: "none",
-              transition: `top ${12}ms linear`,
-            }}/>
-          )}
-
-          <div style={{
-            display: "grid",
-            gridTemplateColumns: `repeat(${GRID}, ${CELL}px)`,
-            gap: `${GAP}px`,
-            width: TOTAL_SIZE,
-            height: TOTAL_SIZE,
-          }}>
-            {allCells.map(cell => {
-              const on = cell.dark && visibleSet.has(cell.id);
-              return (
-                <div key={cell.id} style={{
-                  width: CELL,
-                  height: CELL,
-                  borderRadius: cell.isCorner ? 2 : 1,
-                  background: on
-                    ? cell.isCorner
-                      ? "linear-gradient(135deg,#f5a623,#c8821a)"
-                      : "#f5a623"
-                    : "transparent",
-                  opacity: on ? 1 : 0,
-                  transform: on ? "scale(1)" : "scale(0.05)",
-                  transition: on
-                    ? "opacity 0.1s ease, transform 0.13s cubic-bezier(.34,1.56,.64,1)"
-                    : "opacity 0.05s, transform 0.05s",
-                  boxShadow: on && cell.isCorner ? "0 0 4px rgba(245,166,35,.6)" : "none",
-                }}/>
-              );
-            })}
+        <div style={{position:"relative",display:"inline-block"}}>
+          {scanRow>=0&&<div style={{position:"absolute",left:0,right:0,top:scanRow*(CELL+GAP)+CELL/2-1,height:3,background:"linear-gradient(90deg, transparent, #f5a623cc, #fff, #f5a623cc, transparent)",boxShadow:"0 0 14px #f5a623, 0 0 30px rgba(245,166,35,.55)",borderRadius:2,zIndex:10,pointerEvents:"none",transition:`top ${12}ms linear`}}/>}
+          <div style={{display:"grid",gridTemplateColumns:`repeat(${GRID},${CELL}px)`,gap:`${GAP}px`,width:TOTAL_SIZE,height:TOTAL_SIZE}}>
+            {allCells.map(cell=>{const on=cell.dark&&visibleSet.has(cell.id);return(<div key={cell.id} style={{width:CELL,height:CELL,borderRadius:cell.isCorner?2:1,background:on?(cell.isCorner?"linear-gradient(135deg,#f5a623,#c8821a)":"#f5a623"):"transparent",opacity:on?1:0,transform:on?"scale(1)":"scale(0.05)",transition:on?"opacity 0.1s ease, transform 0.13s cubic-bezier(.34,1.56,.64,1)":"opacity 0.05s, transform 0.05s",boxShadow:on&&cell.isCorner?"0 0 4px rgba(245,166,35,.6)":"none"}}/>);})}
           </div>
         </div>
-
-        {/* SCAN ME label — centered below grid */}
-        <div style={{
-          textAlign: "center",
-          marginTop: 10,
-          color: phase === "complete" ? "#22c55e" : "#f5a623",
-          fontSize: ".7rem",
-          fontWeight: 700,
-          letterSpacing: ".14em",
-          fontFamily: "Syne, sans-serif",
-          transition: "color 0.4s",
-          width: "100%",
-        }}>
-          {phase === "complete" ? "✓ SCAN ME" : "▲ SCAN ME ▲"}
-        </div>
+        <div style={{textAlign:"center",marginTop:10,color:phase==="complete"?"#22c55e":"#f5a623",fontSize:".7rem",fontWeight:700,letterSpacing:".14em",fontFamily:"Syne, sans-serif",transition:"color 0.4s",width:"100%"}}>{phase==="complete"?"✓ SCAN ME":"▲ SCAN ME ▲"}</div>
       </div>
     </div>
   );
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  HEADER — nav links on RIGHT, next to existing action buttons
+//  HEADER
 // ═══════════════════════════════════════════════════════════════
 const Header = ({page, nav, dark, setDark}) => {
   const {history} = useHistory();
   const [mob, setMob] = useState(false);
   const cnt = history.length;
-
   const NavLink = ({id, icon, lbl}) => (
     <button className={`h-nl ${page===id?"on":""}`} onClick={()=>{nav(id);setMob(false);}}>
       {icon && <span style={{marginRight:3}}>{icon}</span>}{lbl}
       {id==="history" && cnt>0 && <span className="h-cnt" style={{marginLeft:4}}>{cnt}</span>}
     </button>
   );
-
   return (
     <>
       <header>
-        {/* Logo — left side */}
-        <div className="h-logo" onClick={()=>nav("home")}>
-          <div className="h-logo-icon">Q</div>
-          <span className="h-logo-txt">QR LAB AI</span>
-        </div>
-
-        {/* ALL controls on right */}
+        <div className="h-logo" onClick={()=>nav("home")}><div className="h-logo-icon">Q</div><span className="h-logo-txt">QR LAB AI</span></div>
         <div className="h-actions">
-          {/* Nav links — same area as buttons, right side */}
           <nav className="h-nav" style={{marginRight:6}}>
-            <NavLink id="home" lbl="Home"/>
-            <NavLink id="generate" lbl="Generate"/>
-            <NavLink id="scan" lbl="Scan"/>
-            <NavLink id="history" lbl="History"/>
+            <NavLink id="home" lbl="Home"/><NavLink id="generate" lbl="Generate"/><NavLink id="scan" lbl="Scan"/><NavLink id="history" lbl="History"/>
           </nav>
-
-          {/* Divider */}
           <div className="h-divider h-desk-only"/>
-
-          {/* Theme toggle */}
-          <button className="h-btn" onClick={()=>setDark(d=>!d)} title="Toggle theme">
-            {dark?"☀️":"🌙"}
-          </button>
-
-          {/* Generate CTA — primary gold */}
-          <button className="h-btn h-btn-primary h-desk-only" onClick={()=>nav("generate")}>
-            ✦ Generate
-          </button>
-
-          {/* Hamburger — mobile only */}
-          <button className="h-btn" id="mob-tog" style={{display:"none"}} onClick={()=>setMob(v=>!v)}>
-            {mob?"✕":"☰"}
-          </button>
+          <button className="h-btn" onClick={()=>setDark(d=>!d)} title="Toggle theme">{dark?"☀️":"🌙"}</button>
+          <button className="h-btn h-btn-primary h-desk-only" onClick={()=>nav("generate")}>✦ Generate</button>
+          <button className="h-btn" id="mob-tog" style={{display:"none"}} onClick={()=>setMob(v=>!v)}>{mob?"✕":"☰"}</button>
           <style>{`@media(max-width:768px){#mob-tog{display:flex!important}}`}</style>
         </div>
       </header>
-
-      {/* Mobile dropdown */}
       {mob && (
         <div className="mob-menu">
-          <NavLink id="home" icon="🏠" lbl="Home"/>
-          <NavLink id="generate" icon="⚡" lbl="Generate QR"/>
-          <NavLink id="scan" icon="📷" lbl="Scan"/>
-          <NavLink id="history" icon="📋" lbl="History"/>
+          <NavLink id="home" icon="🏠" lbl="Home"/><NavLink id="generate" icon="⚡" lbl="Generate QR"/><NavLink id="scan" icon="📷" lbl="Scan"/><NavLink id="history" icon="📋" lbl="History"/>
         </div>
       )}
     </>
@@ -658,22 +409,19 @@ const Header = ({page, nav, dark, setDark}) => {
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  STICKY FABs (bottom-left)
+//  STICKY FABs
 // ═══════════════════════════════════════════════════════════════
 const StickyFABs = ({nav}) => (
   <div className="fab-wrap">
     <button className="fab fab-scan" onClick={()=>nav("scan")} title="Scan QR">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="4 7 4 4 7 4"/><polyline points="17 4 20 4 20 7"/>
-        <polyline points="4 17 4 20 7 20"/><polyline points="17 20 20 20 20 17"/>
-        <line x1="4" y1="12" x2="20" y2="12"/>
+        <polyline points="4 7 4 4 7 4"/><polyline points="17 4 20 4 20 7"/><polyline points="4 17 4 20 7 20"/><polyline points="17 20 20 20 20 17"/><line x1="4" y1="12" x2="20" y2="12"/>
       </svg>
       <span className="fab-tip">Scan QR</span>
     </button>
     <button className="fab fab-gen" onClick={()=>nav("generate")} title="Generate QR">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#080808" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
-        <rect x="3" y="14" width="7" height="7" rx="1"/>
+        <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>
         <line x1="14" y1="14" x2="14" y2="21"/><line x1="14" y1="17.5" x2="21" y2="17.5"/><line x1="21" y1="14" x2="21" y2="21"/>
       </svg>
       <span className="fab-tip">Generate QR</span>
@@ -736,10 +484,8 @@ const Home = ({nav}) => {
   const initRef=useRef(true);
   useEffect(()=>{if(initRef.current){initRef.current=false;build();return;}build();},[cFg,cBg,cShape]);
   const handleLogoFile=f=>{if(!f?.type.startsWith("image/"))return;const r=new FileReader();r.onload=e=>{setCLogo(e.target.result);setTimeout(build,100);};r.readAsDataURL(f);};
-
   return (
     <div>
-      {/* HERO */}
       <section style={{minHeight:"100vh",display:"flex",alignItems:"center",padding:"90px 40px 56px",position:"relative",zIndex:1,background:"radial-gradient(ellipse at 60% 50%,rgba(245,166,35,.1) 0%,transparent 64%)"}}>
         <div className="hero-grid" style={{maxWidth:1160,margin:"0 auto",width:"100%",display:"grid",gridTemplateColumns:"1fr 1fr",gap:52,alignItems:"center"}}>
           <div style={{animation:"sup .8s ease forwards",opacity:0}}>
@@ -754,8 +500,6 @@ const Home = ({nav}) => {
           <div className="hero-qr-wrap" style={{display:"flex",justifyContent:"center",animation:"fin 1s ease .35s forwards",opacity:0}}><HeroQR/></div>
         </div>
       </section>
-
-      {/* LIVE CUSTOMIZER */}
       <section style={{padding:"72px 40px",position:"relative",zIndex:1}}>
         <div style={{maxWidth:1160,margin:"0 auto"}}>
           <div style={{textAlign:"center",marginBottom:44}}>
@@ -765,13 +509,7 @@ const Home = ({nav}) => {
           </div>
           <div className="two-col" style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
             <div className="card" style={{borderRadius:20,padding:22,display:"flex",flexDirection:"column",gap:14}}>
-              <div>
-                <Lbl t="Content / URL"/>
-                <div style={{display:"flex",gap:7}}>
-                  <input value={cUrl} onChange={e=>setCUrl(e.target.value)} onKeyDown={e=>e.key==="Enter"&&build()} placeholder="https://yoursite.com"/>
-                  <button className="gbtn" style={{borderRadius:10,padding:"0 14px",fontSize:".86rem",whiteSpace:"nowrap",flexShrink:0}} onClick={build} disabled={cBusy}>{cBusy?<div className="spin"/>:"↻"}</button>
-                </div>
-              </div>
+              <div><Lbl t="Content / URL"/><div style={{display:"flex",gap:7}}><input value={cUrl} onChange={e=>setCUrl(e.target.value)} onKeyDown={e=>e.key==="Enter"&&build()} placeholder="https://yoursite.com"/><button className="gbtn" style={{borderRadius:10,padding:"0 14px",fontSize:".86rem",whiteSpace:"nowrap",flexShrink:0}} onClick={build} disabled={cBusy}>{cBusy?<div className="spin"/>:"↻"}</button></div></div>
               <div><Lbl t="Shape"/><div style={{display:"flex",gap:6}}>{shapes.map(s=><button key={s.id} onClick={()=>setCShape(s.id)} style={{flex:1,padding:"8px 4px",borderRadius:9,cursor:"pointer",fontSize:".74rem",border:`1px solid ${cShape===s.id?"var(--au)":"var(--br)"}`,background:cShape===s.id?"rgba(245,166,35,.13)":"transparent",color:cShape===s.id?"var(--au)":"var(--mu)",fontWeight:cShape===s.id?700:400,transition:"all .2s"}}><div style={{fontSize:"1rem",marginBottom:2}}>{s.ic}</div>{s.l}</button>)}</div></div>
               <div><Lbl t="Frame"/><div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{frames.map(f=><button key={f.id} onClick={()=>setCFrame(f.id)} style={{padding:"6px 11px",borderRadius:8,cursor:"pointer",fontSize:".75rem",border:`1px solid ${cFrame===f.id?"var(--au)":"var(--br)"}`,background:cFrame===f.id?"rgba(245,166,35,.13)":"transparent",color:cFrame===f.id?"var(--au)":"var(--mu)",fontWeight:cFrame===f.id?700:400,transition:"all .2s"}}>{f.l}</button>)}</div></div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
@@ -806,8 +544,6 @@ const Home = ({nav}) => {
           </div>
         </div>
       </section>
-
-      {/* HOW IT WORKS */}
       <section style={{padding:"80px 40px",position:"relative",zIndex:1,background:"radial-gradient(ellipse at 50% 100%,rgba(245,166,35,.06) 0%,transparent 68%)"}}>
         <div style={{maxWidth:1060,margin:"0 auto"}}>
           <div style={{textAlign:"center",marginBottom:52}}>
@@ -830,8 +566,6 @@ const Home = ({nav}) => {
           </div>
         </div>
       </section>
-
-      {/* CTA */}
       <section style={{padding:"72px 40px",position:"relative",zIndex:1}}>
         <div style={{maxWidth:680,margin:"0 auto"}}>
           <div className="card" style={{borderRadius:26,padding:"clamp(32px,6vw,60px) clamp(22px,5vw,48px)",textAlign:"center",boxShadow:"0 0 72px rgba(245,166,35,.09)",border:"1px solid rgba(245,166,35,.11)",position:"relative",overflow:"hidden"}}>
@@ -921,11 +655,13 @@ const Generate = () => {
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  SCAN
+//  SCAN — FIXED: proper React ref for video + CDN fallback for jsQR
 // ═══════════════════════════════════════════════════════════════
 const Scan = () => {
-  const mountRef  = useRef(null); // div where we inject the video
-  const stateRef  = useRef({});   // holds video, canvas, stream, interval — never stale
+  const videoRef  = useRef(null);   // actual <video> element via React ref
+  const canvasRef = useRef(null);   // offscreen canvas for decoding
+  const streamRef = useRef(null);
+  const intervalRef = useRef(null);
   const fileRef   = useRef(null);
 
   const [phase,   setPhase]  = useState("idle");
@@ -933,130 +669,89 @@ const Scan = () => {
   const [err,     setErr]    = useState(null);
   const [copied,  setCopied] = useState(false);
 
-  /* ── teardown ── */
-  const teardown = useCallback(() => {
-    const s = stateRef.current;
-    if (s.interval) { clearInterval(s.interval); s.interval = null; }
-    if (s.stream)   { s.stream.getTracks().forEach(t => t.stop()); s.stream = null; }
-    if (s.video)    { s.video.srcObject = null; s.video.remove(); s.video = null; }
-    if (s.canvas)   { s.canvas = null; }
+  // Load jsQR with multiple CDN fallbacks
+  const loadJsQR = useCallback(() => {
+    return new Promise((resolve, reject) => {
+      if (window.jsQR) { resolve(); return; }
+      const urls = [
+        "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.3.1/jsQR.min.js",
+      ];
+      let idx = 0;
+      const tryNext = () => {
+        if (idx >= urls.length) { reject(new Error("jsQR could not be loaded")); return; }
+        const sc = document.createElement("script");
+        sc.src = urls[idx++];
+        sc.onload = () => window.jsQR ? resolve() : tryNext();
+        sc.onerror = tryNext;
+        document.head.appendChild(sc);
+      };
+      tryNext();
+    });
   }, []);
 
-  useEffect(() => () => teardown(), [teardown]);
+  const stopScan = useCallback(() => {
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+    if (videoRef.current) { videoRef.current.srcObject = null; }
+  }, []);
 
-  /* ── start ── */
-  const startScan = useCallback(async () => {
-    teardown();
-    setErr(null); setResult(null); setPhase("loading");
+  useEffect(() => () => stopScan(), [stopScan]);
 
-    /* 1 ── load jsQR */
-    if (!window.jsQR) {
-      try {
-        await new Promise((ok, fail) => {
-          const sc = document.createElement("script");
-          sc.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js";
-          sc.onload = ok;
-          sc.onerror = () => fail(new Error("jsQR load failed"));
-          document.head.appendChild(sc);
-        });
-      } catch(e) { setErr("Could not load QR library."); setPhase("error"); return; }
-    }
-
-    /* 2 ── camera */
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal:"environment" }, width:{ideal:1280}, height:{ideal:720} },
-        audio: false
-      });
-    } catch(e1) {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      } catch(e2) {
-        setErr("Camera denied or unavailable. Please grant camera permission and try again.");
-        setPhase("error"); return;
-      }
-    }
-
-    /* 3 ── create video element and inject it into the mount div */
-    const video = document.createElement("video");
-    video.setAttribute("playsinline", "");
-    video.setAttribute("muted", "");
-    video.muted = true;
-    video.style.cssText = "width:100%;height:100%;object-fit:cover;display:block;border-radius:12px;";
-    video.srcObject = stream;
-
-    const mount = mountRef.current;
-    if (!mount) { stream.getTracks().forEach(t=>t.stop()); return; }
-    mount.innerHTML = "";
-    mount.appendChild(video);
-
-    /* 4 ── play */
-    try { await video.play(); } catch(_) {}
-
-    /* 5 ── wait for real frames */
-    await new Promise(ok => {
-      const check = () => {
-        if (video.readyState >= 2 && video.videoWidth > 0) { ok(); return; }
-        setTimeout(check, 100);
-      };
-      check();
-    });
-
-    /* 6 ── canvas */
-    const canvas = document.createElement("canvas");
-
-    stateRef.current = { video, canvas, stream, interval: null };
-    setPhase("scanning");
-
-    /* 7 ── decode loop every 300ms */
-    stateRef.current.interval = setInterval(() => {
-      const { video: v, canvas: c } = stateRef.current;
-      if (!v || !c || !window.jsQR) return;
-      if (!v.videoWidth || !v.videoHeight || v.paused || v.ended) return;
-
-      c.width  = v.videoWidth;
-      c.height = v.videoHeight;
-      const ctx = c.getContext("2d");
-      ctx.drawImage(v, 0, 0, c.width, c.height);
-
+  const startDecoding = useCallback((video) => {
+    const canvas = canvasRef.current || document.createElement("canvas");
+    intervalRef.current = setInterval(() => {
+      if (!video || !window.jsQR) return;
+      if (!video.videoWidth || video.paused || video.ended) return;
+      canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       let imgData;
-      try { imgData = ctx.getImageData(0, 0, c.width, c.height); }
-      catch(_) { return; }
-
-      const qr = window.jsQR(imgData.data, imgData.width, imgData.height, {
-        inversionAttempts: "dontInvert"
-      });
-
+      try { imgData = ctx.getImageData(0, 0, canvas.width, canvas.height); } catch(_) { return; }
+      const qr = window.jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: "dontInvert" });
       if (qr && qr.data) {
-        clearInterval(stateRef.current.interval);
-        stateRef.current.interval = null;
-        stateRef.current.stream.getTracks().forEach(t => t.stop());
-        stateRef.current.stream = null;
+        clearInterval(intervalRef.current); intervalRef.current = null;
+        stopScan();
         setResult(qr.data);
         setPhase("result");
-        // clear the video DOM
-        if (mountRef.current) mountRef.current.innerHTML = "";
       }
     }, 300);
+  }, [stopScan]);
 
-  }, [teardown]);
+  const startScan = useCallback(async () => {
+    stopScan();
+    setErr(null); setResult(null); setPhase("loading");
+    try { await loadJsQR(); } catch(e) { setErr("Could not load QR library. Check your connection."); setPhase("error"); return; }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal:"environment" }, width:{ideal:1280}, height:{ideal:720} }, audio: false });
+    } catch(e1) {
+      try { stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); }
+      catch(e2) { setErr("Camera denied or unavailable. Please grant camera permission and try again."); setPhase("error"); return; }
+    }
+    streamRef.current = stream;
+    // Set scanning phase so <video> element renders, then assign srcObject
+    setPhase("scanning");
+    setTimeout(() => {
+      const video = videoRef.current;
+      if (!video) { stopScan(); setPhase("idle"); return; }
+      video.srcObject = stream;
+      video.muted = true;
+      video.play().catch(() => {});
+      const waitForFrames = () => {
+        if (video.readyState >= 2 && video.videoWidth > 0) { startDecoding(video); return; }
+        setTimeout(waitForFrames, 120);
+      };
+      waitForFrames();
+    }, 100);
+  }, [loadJsQR, stopScan, startDecoding]);
 
-  const stopScan = useCallback(() => { teardown(); setPhase("idle"); }, [teardown]);
-  const reset    = useCallback(() => { teardown(); setPhase("idle"); setResult(null); setErr(null); }, [teardown]);
+  const reset = useCallback(() => { stopScan(); setPhase("idle"); setResult(null); setErr(null); }, [stopScan]);
 
-  /* ── scan from image ── */
   const scanFile = useCallback(async (file) => {
     if (!file) return;
     setErr(null); setResult(null);
-    if (!window.jsQR) {
-      await new Promise((ok, fail) => {
-        const sc = document.createElement("script");
-        sc.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js";
-        sc.onload = ok; sc.onerror = () => fail();
-        document.head.appendChild(sc);
-      }).catch(() => { setErr("Could not load QR library."); return; });
-    }
+    try { await loadJsQR(); } catch(e) { setErr("Could not load QR library."); return; }
     const img = new Image();
     img.onload = () => {
       const c = document.createElement("canvas");
@@ -1071,7 +766,7 @@ const Scan = () => {
     };
     img.onerror = () => setErr("Could not read image.");
     img.src = URL.createObjectURL(file);
-  }, []);
+  }, [loadJsQR]);
 
   const isLoading  = phase === "loading";
   const isScanning = phase === "scanning";
@@ -1080,153 +775,66 @@ const Scan = () => {
   return (
     <div style={{minHeight:"100vh",paddingTop:80,paddingBottom:56,position:"relative",zIndex:1}}>
       <div className="page-wrap" style={{maxWidth:520,margin:"0 auto",padding:"0 18px"}}>
-
         <div style={{textAlign:"center",marginBottom:26}}>
           <div className="badge" style={{display:"inline-flex",marginBottom:10}}>📷 QR Scanner</div>
           <h1 style={{fontSize:"clamp(1.8rem,5vw,2.7rem)",fontWeight:800,marginBottom:8}}>Scan <span className="gtext">QR Code</span></h1>
           <p className="mu">Point your camera at a QR code to decode it instantly.</p>
         </div>
-
         <div className="card" style={{borderRadius:20,padding:20,textAlign:"center"}}>
-
-          {/* viewport */}
-          <div style={{position:"relative",borderRadius:12,overflow:"hidden",background:"#060608",
-                       minHeight:290,marginBottom:14}}>
-
-            {/* ← video injected here by DOM directly */}
-            <div ref={mountRef} style={{
-              width:"100%", height:"100%", minHeight:290,
-              display: isScanning ? "block" : "none",
-              borderRadius:12, overflow:"hidden"
-            }}/>
-
-            {/* idle */}
-            {phase === "idle" && (
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",
-                           justifyContent:"center",minHeight:290,gap:10}}>
-                <div style={{fontSize:"3rem"}}>📷</div>
-                <p style={{color:"#7878a0",fontSize:".9rem"}}>Camera will appear here</p>
-              </div>
-            )}
-
-            {/* loading */}
-            {isLoading && (
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",
-                           justifyContent:"center",minHeight:290,gap:12}}>
-                <div style={{width:42,height:42,border:"3px solid rgba(245,166,35,.2)",
-                             borderTopColor:"var(--au)",borderRadius:"50%",
-                             animation:"spinning .7s linear infinite"}}/>
-                <p style={{color:"var(--au)",fontWeight:600,fontSize:".9rem"}}>Starting camera…</p>
-              </div>
-            )}
-
-            {/* scan overlay */}
-            {isScanning && (
+          <div style={{position:"relative",borderRadius:12,overflow:"hidden",background:"#060608",minHeight:290,marginBottom:14}}>
+            {/* Video always in DOM — shown/hidden by display */}
+            <video ref={videoRef} playsInline muted style={{width:"100%",height:"100%",minHeight:290,objectFit:"cover",display:isScanning?"block":"none",borderRadius:12}}/>
+            {phase==="idle"&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:290,gap:10}}><div style={{fontSize:"3rem"}}>📷</div><p style={{color:"#7878a0",fontSize:".9rem"}}>Camera will appear here</p></div>}
+            {isLoading&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:290,gap:12}}><div style={{width:42,height:42,border:"3px solid rgba(245,166,35,.2)",borderTopColor:"var(--au)",borderRadius:"50%",animation:"spinning .7s linear infinite"}}/><p style={{color:"var(--au)",fontWeight:600,fontSize:".9rem"}}>Starting camera…</p></div>}
+            {phase==="error"&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:290,gap:10,padding:20}}><div style={{fontSize:"2.5rem"}}>⚠️</div><p style={{color:"#ef4444",fontSize:".88rem",textAlign:"center"}}>{err}</p></div>}
+            {isScanning&&(
               <>
-                <div style={{position:"absolute",left:0,right:0,height:2,top:0,
-                             background:"linear-gradient(90deg,transparent,var(--au),#fff,var(--au),transparent)",
-                             boxShadow:"0 0 10px var(--au)",
-                             animation:"scl 1.8s ease-in-out infinite",zIndex:10}}/>
+                <div style={{position:"absolute",left:0,right:0,height:2,top:0,background:"linear-gradient(90deg,transparent,var(--au),#fff,var(--au),transparent)",boxShadow:"0 0 10px var(--au)",animation:"scl 1.8s ease-in-out infinite",zIndex:10}}/>
                 {[["left","top"],["right","top"],["left","bottom"],["right","bottom"]].map(([h,v],i)=>(
-                  <div key={i} style={{position:"absolute",[h]:12,[v]:12,width:28,height:28,zIndex:11,
-                    borderTop:    v==="top"    ?"3px solid var(--au)":"none",
-                    borderBottom: v==="bottom" ?"3px solid var(--au)":"none",
-                    borderLeft:   h==="left"   ?"3px solid var(--au)":"none",
-                    borderRight:  h==="right"  ?"3px solid var(--au)":"none",
-                    filter:"drop-shadow(0 0 4px var(--au))"}}/>
+                  <div key={i} style={{position:"absolute",[h]:12,[v]:12,width:28,height:28,zIndex:11,borderTop:v==="top"?"3px solid var(--au)":"none",borderBottom:v==="bottom"?"3px solid var(--au)":"none",borderLeft:h==="left"?"3px solid var(--au)":"none",borderRight:h==="right"?"3px solid var(--au)":"none",filter:"drop-shadow(0 0 4px var(--au))"}}/>
                 ))}
-                <div style={{position:"absolute",bottom:10,left:0,right:0,
-                             textAlign:"center",zIndex:11}}>
-                  <span style={{background:"rgba(0,0,0,.65)",color:"var(--au)",fontSize:".7rem",
-                                fontWeight:700,padding:"3px 12px",borderRadius:100,
-                                letterSpacing:".07em"}}>● SCANNING…</span>
+                <div style={{position:"absolute",bottom:10,left:0,right:0,textAlign:"center",zIndex:11}}>
+                  <span style={{background:"rgba(0,0,0,.65)",color:"var(--au)",fontSize:".7rem",fontWeight:700,padding:"3px 12px",borderRadius:100,letterSpacing:".07em"}}>● SCANNING…</span>
                 </div>
               </>
             )}
-
-            {/* result overlay */}
-            {hasResult && (
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",
-                           justifyContent:"center",minHeight:290,gap:10,padding:20}}>
+            {hasResult&&(
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:290,gap:10,padding:20}}>
                 <div style={{fontSize:"2.8rem"}}>✅</div>
-                <div style={{color:"var(--gn)",fontWeight:800,fontSize:"1rem",letterSpacing:".04em"}}>
-                  QR DETECTED!
-                </div>
-                <div style={{color:"#ccc",wordBreak:"break-all",fontSize:".82rem",
-                             lineHeight:1.6,textAlign:"center"}}>{result}</div>
+                <div style={{color:"var(--gn)",fontWeight:800,fontSize:"1rem",letterSpacing:".04em"}}>QR DETECTED!</div>
+                <div style={{color:"#ccc",wordBreak:"break-all",fontSize:".82rem",lineHeight:1.6,textAlign:"center"}}>{result}</div>
               </div>
             )}
           </div>
-
-          {/* error */}
-          {err && (
-            <div style={{background:"rgba(239,68,68,.09)",border:"1px solid rgba(239,68,68,.27)",
-                         borderRadius:10,padding:"11px 13px",color:"#ef4444",marginBottom:12,
-                         fontSize:".83rem",lineHeight:1.5,textAlign:"left"}}>⚠️ {err}</div>
-          )}
-
-          {/* actions */}
+          {err&&phase!=="error"&&<div style={{background:"rgba(239,68,68,.09)",border:"1px solid rgba(239,68,68,.27)",borderRadius:10,padding:"11px 13px",color:"#ef4444",marginBottom:12,fontSize:".83rem",lineHeight:1.5,textAlign:"left"}}>⚠️ {err}</div>}
           {hasResult ? (
             <div style={{display:"grid",gap:8}}>
-              <div className="card" style={{borderRadius:10,padding:"12px 14px",
-                                           wordBreak:"break-all",textAlign:"left",
-                                           fontSize:".84rem",lineHeight:1.55}}>
-                <p style={{color:"#7878a0",fontSize:".68rem",marginBottom:4,
-                           textTransform:"uppercase",letterSpacing:".06em"}}>Decoded</p>
+              <div className="card" style={{borderRadius:10,padding:"12px 14px",wordBreak:"break-all",textAlign:"left",fontSize:".84rem",lineHeight:1.55}}>
+                <p style={{color:"#7878a0",fontSize:".68rem",marginBottom:4,textTransform:"uppercase",letterSpacing:".06em"}}>Decoded</p>
                 {result}
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
-                {result.startsWith("http") && (
-                  <button className="gbtn" style={{borderRadius:10,padding:10,fontSize:".85rem"}}
-                    onClick={()=>window.open(result,"_blank")}>🔗 Open Link</button>
-                )}
-                <button className="ghost"
-                  style={{borderRadius:10,padding:10,fontSize:".85rem",
-                          gridColumn:result.startsWith("http")?"auto":"1/-1"}}
-                  onClick={()=>{navigator.clipboard.writeText(result);
-                    setCopied(true);setTimeout(()=>setCopied(false),2000);}}>
-                  {copied?"✓ Copied!":"📋 Copy"}
-                </button>
-                <button className="ghost"
-                  style={{borderRadius:10,padding:10,fontSize:".85rem",gridColumn:"1/-1"}}
-                  onClick={reset}>🔄 Scan Again</button>
+                {result.startsWith("http")&&<button className="gbtn" style={{borderRadius:10,padding:10,fontSize:".85rem"}} onClick={()=>window.open(result,"_blank")}>🔗 Open Link</button>}
+                <button className="ghost" style={{borderRadius:10,padding:10,fontSize:".85rem",gridColumn:result.startsWith("http")?"auto":"1/-1"}} onClick={()=>{navigator.clipboard.writeText(result);setCopied(true);setTimeout(()=>setCopied(false),2000);}}>{copied?"✓ Copied!":"📋 Copy"}</button>
+                <button className="ghost" style={{borderRadius:10,padding:10,fontSize:".85rem",gridColumn:"1/-1"}} onClick={reset}>🔄 Scan Again</button>
               </div>
             </div>
           ) : (
             <div style={{display:"grid",gap:8}}>
-              <button
-                className={isScanning?"ghost":"gbtn"}
-                style={{width:"100%",borderRadius:12,padding:"13px",fontSize:".96rem",
-                        display:"flex",alignItems:"center",justifyContent:"center",gap:8}}
-                onClick={isScanning ? stopScan : startScan}
-                disabled={isLoading}>
-                {isLoading ? <><div className="spin"/>Starting…</>
-                 : isScanning ? "⏹ Stop Camera"
-                 : "▶ Start Camera Scan"}
+              <button className={isScanning?"ghost":"gbtn"} style={{width:"100%",borderRadius:12,padding:"13px",fontSize:".96rem",display:"flex",alignItems:"center",justifyContent:"center",gap:8}} onClick={isScanning?()=>{stopScan();setPhase("idle");}:startScan} disabled={isLoading}>
+                {isLoading?<><div className="spin"/>Starting…</>:isScanning?"⏹ Stop Camera":"▶ Start Camera Scan"}
               </button>
-
               <div style={{display:"flex",alignItems:"center",gap:10,margin:"2px 0"}}>
-                <div style={{flex:1,height:1,background:"var(--br)"}}/>
-                <span style={{color:"var(--mu)",fontSize:".73rem",fontWeight:600}}>OR</span>
-                <div style={{flex:1,height:1,background:"var(--br)"}}/>
+                <div style={{flex:1,height:1,background:"var(--br)"}}/><span style={{color:"var(--mu)",fontSize:".73rem",fontWeight:600}}>OR</span><div style={{flex:1,height:1,background:"var(--br)"}}/>
               </div>
-
-              <button className="ghost"
-                style={{width:"100%",borderRadius:12,padding:"12px",fontSize:".9rem",
-                        display:"flex",alignItems:"center",justifyContent:"center",gap:8}}
-                onClick={()=>fileRef.current?.click()}>
-                🖼️ Upload Image to Scan
-              </button>
-              <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}}
-                onChange={e=>{scanFile(e.target.files[0]);e.target.value="";}}/>
-
-              <p style={{color:"var(--mu)",fontSize:".73rem",textAlign:"center"}}>
-                Works on mobile & desktop · PNG / JPG / WebP
-              </p>
+              <button className="ghost" style={{width:"100%",borderRadius:12,padding:"12px",fontSize:".9rem",display:"flex",alignItems:"center",justifyContent:"center",gap:8}} onClick={()=>fileRef.current?.click()}>🖼️ Upload Image to Scan</button>
+              <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}} onChange={e=>{scanFile(e.target.files[0]);e.target.value="";}}/>
+              <p style={{color:"var(--mu)",fontSize:".73rem",textAlign:"center"}}>Works on mobile & desktop · PNG / JPG / WebP</p>
             </div>
           )}
         </div>
       </div>
+      <canvas ref={canvasRef} style={{display:"none"}}/>
     </div>
   );
 };
@@ -1354,9 +962,7 @@ const About = ({nav}) => {
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  CONTACT PAGE — Formspree integration → lukhmaan321@gmail.com
-//  Replace YOUR_FORMSPREE_ID below with your actual form ID
-//  from formspree.io (e.g. "xabcd1234")
+//  CONTACT PAGE
 // ═══════════════════════════════════════════════════════════════
 const FORMSPREE_ID = "mjgavgpl";
 
@@ -1375,23 +981,11 @@ const Contact = () => {
       const res = await fetch(`https://formspree.io/f/${FORMSPREE_ID}`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify({
-          name: form.name,
-          email: form.email,
-          subject: form.subject || "Contact from QR LAB AI",
-          message: form.message,
-          _replyto: form.email,
-        }),
+        body: JSON.stringify({ name: form.name, email: form.email, subject: form.subject || "Contact from QR LAB AI", message: form.message, _replyto: form.email }),
       });
       const data = await res.json();
-      if (res.ok) {
-        setSent(true);
-      } else {
-        setErr(data?.errors?.[0]?.message || "Something went wrong. Please try again.");
-      }
-    } catch(e) {
-      setErr("Network error. Please check your connection and try again.");
-    }
+      if (res.ok) { setSent(true); } else { setErr(data?.errors?.[0]?.message || "Something went wrong. Please try again."); }
+    } catch(e) { setErr("Network error. Please check your connection and try again."); }
     setSending(false);
   };
 
@@ -1411,7 +1005,6 @@ const Contact = () => {
             <button className="gbtn" style={{marginTop:22,borderRadius:12,padding:"11px 28px",fontSize:".93rem"}} onClick={()=>{setSent(false);setForm({name:"",email:"",subject:"",message:""});}}>Send Another</button>
           </div>
           :<div className="card" style={{borderRadius:22,padding:"28px 24px",display:"flex",flexDirection:"column",gap:16}}>
-
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:13}}>
               <div><Lbl t="Your Name *"/><input value={form.name} onChange={e=>upd("name",e.target.value)} placeholder="John Doe"/></div>
               <div><Lbl t="Email Address *"/><input type="email" value={form.email} onChange={e=>upd("email",e.target.value)} placeholder="you@example.com"/></div>
@@ -1524,12 +1117,8 @@ const Footer = ({nav}) => {
               <span style={{fontFamily:"Syne,sans-serif",fontWeight:800,fontSize:"1.18rem",background:"linear-gradient(135deg,var(--au),#eeeef8 80%)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",backgroundClip:"text"}}>QR LAB AI</span>
             </div>
             <p style={{color:"#7878a0",fontSize:"1rem",lineHeight:1.75,maxWidth:255,marginBottom:18}}>Create • Scan • Share QR Codes. The AI-powered QR platform for modern businesses and creators worldwide.</p>
-            <div style={{display:"flex",gap:8,marginBottom:20}}>
-              {socials.map(({ic,l})=><button key={l} className="social-btn" title={l}>{ic}</button>)}
-            </div>
-            <div style={{display:"flex",gap:3,opacity:.16}}>
-              {[1,0,1,1,0,1,0,1,1,0,1,1,0,1].map((v,i)=><div key={i} style={{width:7,height:7,borderRadius:2,background:v?"var(--au)":"transparent",border:v?"none":"1px solid rgba(245,166,35,.3)"}}/>)}
-            </div>
+            <div style={{display:"flex",gap:8,marginBottom:20}}>{socials.map(({ic,l})=><button key={l} className="social-btn" title={l}>{ic}</button>)}</div>
+            <div style={{display:"flex",gap:3,opacity:.16}}>{[1,0,1,1,0,1,0,1,1,0,1,1,0,1].map((v,i)=><div key={i} style={{width:7,height:7,borderRadius:2,background:v?"var(--au)":"transparent",border:v?"none":"1px solid rgba(245,166,35,.3)"}}/>)}</div>
           </div>
           <div className="foot-col" style={delay(.1)}>
             <p className="foot-head">Product</p>
@@ -1575,26 +1164,18 @@ export default function App() {
   const [dark, setDark] = useState(true);
   const [top, setTop] = useState(false);
 
-  // ── Persist history to localStorage — survives refreshes ──
   const [history, setHistory] = useState(() => {
-    try {
-      const saved = localStorage.getItem("qrlab_history");
-      return saved ? JSON.parse(saved) : [];
-    } catch(_) { return []; }
+    try { const saved = localStorage.getItem("qrlab_history"); return saved ? JSON.parse(saved) : []; }
+    catch(_) { return []; }
   });
 
-  // Sync history to localStorage whenever it changes
   useEffect(() => {
-    try { localStorage.setItem("qrlab_history", JSON.stringify(history)); }
-    catch(_) {}
+    try { localStorage.setItem("qrlab_history", JSON.stringify(history)); } catch(_) {}
   }, [history]);
 
   const addToHistory = useCallback((item) => setHistory(prev => [item,...prev].slice(0,100)),[]);
   const removeFromHistory = useCallback((id) => setHistory(prev => prev.filter(h=>h.id!==id)),[]);
-  const clearHistory = useCallback(() => {
-    setHistory([]);
-    try { localStorage.removeItem("qrlab_history"); } catch(_) {}
-  },[]);
+  const clearHistory = useCallback(() => { setHistory([]); try { localStorage.removeItem("qrlab_history"); } catch(_) {} },[]);
 
   useEffect(()=>{injectStyles();},[]);
   useEffect(()=>{document.body.classList.toggle("lm",!dark);},[dark]);
